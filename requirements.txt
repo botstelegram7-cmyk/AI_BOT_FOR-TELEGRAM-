@@ -1,0 +1,14 @@
+# Telegram
+python-telegram-bot==21.6
+
+# OpenAI-compatible (OpenAI, Grok, Groq, SambaNova all use this)
+openai>=1.40.0
+
+# Anthropic / Claude
+anthropic>=0.34.0
+
+# Google Gemini
+google-generativeai>=0.8.0
+
+# Groq (optional — openai-compat also works, but official SDK is nicer)
+groq>=0.9.0
