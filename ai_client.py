@@ -55,9 +55,12 @@ AVAILABLE_MODELS = {
         "name": "⚡ Groq (Fast LLMs)",
         "env_key": "GROQ_API_KEY",
         "models": {
-            "llama-3.3-70b-versatile":   "Llama 3.3 70B",
-            "llama-3.1-8b-instant":      "Llama 3.1 8B Instant ⚡",
-            "mixtral-8x7b-32768":        "Mixtral 8x7B",
+            "llama-3.3-70b-versatile":     "Llama 3.3 70B",
+            "llama-3.1-8b-instant":        "Llama 3.1 8B Instant ⚡",
+            "llama3-70b-8192":             "Llama 3 70B",
+            "mixtral-8x7b-32768":          "Mixtral 8x7B",
+            "openai/gpt-oss-120b":         "GPT-OSS 120B (Groq) 🔥",
+            "deepseek-r1-distill-llama-70b": "DeepSeek R1 70B",
         },
     },
     "sambanova": {
@@ -152,11 +155,26 @@ def _grok(model: str, messages: list) -> str:
 
 
 def _groq(model: str, messages: list) -> str:
-    return _openai_compat(
-        "https://api.groq.com/openai/v1",
-        config.GROQ_API_KEY,
-        model, messages,
+    # Official Groq SDK with streaming (as per Groq playground)
+    from groq import Groq
+    client = Groq(api_key=config.GROQ_API_KEY)
+
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=1,
+        max_completion_tokens=8192,
+        top_p=1,
+        stream=True,
+        stop=None,
     )
+    # Collect all streamed chunks into one string
+    result = ""
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            result += delta
+    return result
 
 
 def _sambanova(model: str, messages: list) -> str:
