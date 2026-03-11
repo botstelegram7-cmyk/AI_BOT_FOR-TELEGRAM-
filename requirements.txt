@@ -1,5 +1,5 @@
-# Telegram
-python-telegram-bot==21.6
+# Telegram (webhooks extra is required for run_webhook on Render)
+python-telegram-bot[webhooks]==21.6
 
 # OpenAI-compatible (OpenAI, Grok, Groq, SambaNova all use this)
 openai>=1.40.0
