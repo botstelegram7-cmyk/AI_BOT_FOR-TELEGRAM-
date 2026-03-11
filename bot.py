@@ -39,6 +39,12 @@ allowed_users: dict = {}   # { user_id: { "username":str, "limit":int|None, "add
 banned_users:  set  = set()
 usage_today:   dict = {}   # { user_id: { "date": date, "count": int } }
 
+# ─────────────────────────────────────────────
+#  GLOBAL SYSTEM PROMPT  (owner sets via /setprompt)
+# ─────────────────────────────────────────────
+DEFAULT_SYSTEM_PROMPT = "You are a helpful, friendly, and concise AI assistant."
+current_system_prompt: str = DEFAULT_SYSTEM_PROMPT
+
 
 def is_owner(user_id: int, username: str = None) -> bool:
     if user_id in config.OWNER_IDS:
@@ -168,6 +174,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/setlimit `<id>` `<N|0>` — Daily limit set karein\n"
         "/users — Allowed users list\n"
         "/broadcast `<msg>` — Sabko message bhejein\n"
+        "/setprompt `<text>` — AI ka system prompt set karein\n"
+        "/viewprompt — Current system prompt dekho\n"
+        "/resetprompt — Default prompt restore karein\n"
     ) if is_owner(user.id) else ""
     await update.message.reply_text(base + owner_cmds, parse_mode="Markdown")
 
@@ -344,6 +353,59 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📢 Sent: {sent} | Failed: {failed}")
 
 
+@owner_only
+async def cmd_setprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /setprompt <instructions>
+    Sets the global AI system prompt used for ALL users.
+    Example: /setprompt You are a sarcastic assistant who replies in Hinglish.
+    """
+    global current_system_prompt
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage: `/setprompt <instructions>`\n\n"
+            "Example:\n`/setprompt You are a helpful assistant who always replies in Hindi.`",
+            parse_mode="Markdown",
+        )
+        return
+    new_prompt = " ".join(ctx.args).strip()
+    current_system_prompt = new_prompt
+    # Clear all user histories so the new prompt takes effect cleanly
+    for state in user_states.values():
+        state["history"] = []
+    await update.message.reply_text(
+        f"✅ *System prompt update ho gaya!*\n\n"
+        f"`{new_prompt}`\n\n"
+        f"_Sabki chat history clear ho gayi taaki naya prompt turant apply ho._",
+        parse_mode="Markdown",
+    )
+
+
+@owner_only
+async def cmd_viewprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Shows the currently active system prompt."""
+    is_default = current_system_prompt == DEFAULT_SYSTEM_PROMPT
+    tag = " _(default)_" if is_default else " _(custom)_"
+    await update.message.reply_text(
+        f"📋 *Current System Prompt*{tag}\n\n`{current_system_prompt}`",
+        parse_mode="Markdown",
+    )
+
+
+@owner_only
+async def cmd_resetprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Resets system prompt back to default."""
+    global current_system_prompt
+    current_system_prompt = DEFAULT_SYSTEM_PROMPT
+    for state in user_states.values():
+        state["history"] = []
+    await update.message.reply_text(
+        f"🔄 *System prompt reset ho gaya!*\n\n`{DEFAULT_SYSTEM_PROMPT}`\n\n"
+        f"_Sabki history bhi clear ho gayi._",
+        parse_mode="Markdown",
+    )
+
+
 # ═══════════════════════════════════════════════════════
 #  MODEL PICKER
 # ═══════════════════════════════════════════════════════
@@ -433,10 +495,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state["history"].append({"role": "user", "content": user_text})
 
     try:
+        # Prepend current system prompt to every AI call
+        messages_with_prompt = [
+            {"role": "system", "content": current_system_prompt}
+        ] + state["history"]
         reply = await get_ai_response(
             provider=state["provider"],
             model=state["model"],
-            messages=state["history"],
+            messages=messages_with_prompt,
         )
         state["history"].append({"role": "assistant", "content": reply})
         if len(state["history"]) > config.MAX_HISTORY:
@@ -476,7 +542,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("unban",      cmd_unban))
     app.add_handler(CommandHandler("setlimit",   cmd_setlimit))
     app.add_handler(CommandHandler("users",      cmd_users))
-    app.add_handler(CommandHandler("broadcast",  cmd_broadcast))
+    app.add_handler(CommandHandler("broadcast",   cmd_broadcast))
+    app.add_handler(CommandHandler("setprompt",   cmd_setprompt))
+    app.add_handler(CommandHandler("viewprompt",  cmd_viewprompt))
+    app.add_handler(CommandHandler("resetprompt", cmd_resetprompt))
 
     app.add_handler(CallbackQueryHandler(cb_provider,       pattern=r"^prov:"))
     app.add_handler(CallbackQueryHandler(cb_model,          pattern=r"^model:"))
