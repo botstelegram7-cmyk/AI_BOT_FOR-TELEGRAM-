@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: telegram-ai-bot
+    runtime: docker          # Uses our Dockerfile
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /       # PTB aiohttp automatically returns 200 on /
+    envVars:
+      # ── Required ──────────────────────────────────────────────
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false          # Render UI mein manually enter karein (secret)
+
+      # ── Render auto-injects these — DO NOT set manually ───────
+      # RENDER_EXTERNAL_URL → webhook URL auto-ban jaata hai
+      # PORT               → bot yahan listen karta hai
+
+      # ── AI Keys (jo bhi chahiye woh uncomment karein) ─────────
+      - key: GROK_API_KEY
+        sync: false
+
+      - key: SAMBANOVA_API_KEY
+        sync: false
+
+      # - key: OPENAI_API_KEY
+      #   sync: false
+
+      # - key: ANTHROPIC_API_KEY
+      #   sync: false
+
+      # - key: GEMINI_API_KEY
+      #   sync: false
+
+      # - key: GROQ_API_KEY
+      #   sync: false
+
+      # ── Optional tuning ───────────────────────────────────────
+      - key: DEFAULT_PROVIDER
+        value: grok
+
+      - key: DEFAULT_MODEL
+        value: grok-4-latest
+
+      - key: MAX_HISTORY
+        value: "20"

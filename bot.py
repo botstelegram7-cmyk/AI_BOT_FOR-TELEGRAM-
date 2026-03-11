@@ -1,7 +1,7 @@
 """
 Telegram AI Bot — Multi-provider AI bot with Render webhook support.
-Run locally  → set WEBHOOK_URL="" → uses polling
-Deploy Render → set WEBHOOK_URL="https://your-app.onrender.com" → uses webhook
+Run locally  → WEBHOOK_URL empty → polling mode
+Render deploy → RENDER_EXTERNAL_URL auto-detected → webhook mode (no manual config needed)
 """
 
 import logging
