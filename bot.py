@@ -961,6 +961,29 @@ def _stats_text() -> str:
         f"🗄️ MongoDB  : {'✅' if s['mongo_enabled'] else '⚠️ In-memory'}"
     )
 
+async def cmd_miniapp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send the Mini App button — /app command."""
+    user    = update.effective_user
+    ok, msg = can_use_bot(user.id)
+    if not ok:
+        await update.message.reply_text(msg)
+        return
+    app_url = f"{config.WEBHOOK_URL}/app" if config.WEBHOOK_URL else None
+    if not app_url:
+        await update.message.reply_text("⚠️ Mini App sirf Render deploy pe available hai.")
+        return
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🚀 Open AI Bot App", web_app=WebAppInfo(url=app_url))
+    ]])
+    await update.message.reply_text(
+        "📱 *AI Bot Mini App*\n\n"
+        "Profile, Leaderboard, Characters, Chat — sab ek jagah!\n\n"
+        "_Button press karo:_ 👇",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb,
+    )
+
+
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("⛔ Owner only.")
