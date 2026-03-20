@@ -209,21 +209,23 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━"
     )
 
-    kb = InlineKeyboardMarkup([
+    _kb_rows = [
         [InlineKeyboardButton("💬 AI Se Baat Karo", callback_data="start:chat"),
          InlineKeyboardButton("💞 Companions",      callback_data="start:meet")],
         [InlineKeyboardButton("🔌 Model Chunein",   callback_data="start:model"),
          InlineKeyboardButton("👤 Profile",         callback_data="start:profile")],
         [InlineKeyboardButton("📊 Meri Stats",      callback_data="start:status"),
          InlineKeyboardButton("🏆 Leaderboard",     callback_data="start:top")],
-        [InlineKeyboardButton("📱 Mini App", web_app=WebAppInfo(url=f"{config.WEBHOOK_URL}/app"))
-         ] if config.WEBHOOK_URL else [],
-        [
-            InlineKeyboardButton(config.OWNER_CONTACTS[0][0], url=config.OWNER_CONTACTS[0][1]),
-            InlineKeyboardButton(config.OWNER_CONTACTS[1][0], url=config.OWNER_CONTACTS[1][1]),
-        ],
+    ]
+    if config.WEBHOOK_URL:
+        _kb_rows.append([
+            InlineKeyboardButton("📱 Mini App", web_app=WebAppInfo(url=f"{config.WEBHOOK_URL}/app"))
+        ])
+    _kb_rows.append([
+        InlineKeyboardButton(config.OWNER_CONTACTS[0][0], url=config.OWNER_CONTACTS[0][1]),
+        InlineKeyboardButton(config.OWNER_CONTACTS[1][0], url=config.OWNER_CONTACTS[1][1]),
     ])
-    kb.inline_keyboard = [r for r in kb.inline_keyboard if r]
+    kb = InlineKeyboardMarkup(_kb_rows)
 
     sent = False
     if config.WELCOME_VIDEO:
@@ -1181,605 +1183,674 @@ _MINI_APP_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>AI Bot</title>
-<link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root {
-  --bg: #f0f4ff; --surface: #ffffff; --surface2: #f8f0ff;
-  --border: #e8e0ff; --text: #1a1040; --text2: #6b5b95;
-  --accent: #7c4dff; --accent2: #ff4081; --accent3: #00bcd4;
-  --grad: linear-gradient(135deg, #7c4dff, #ff4081);
-  --grad2: linear-gradient(135deg, #00bcd4, #7c4dff);
-  --shadow: 0 4px 24px rgba(124,77,255,.15);
-  --radius: 20px; --radius-sm: 12px;
+:root{
+  --bg:#f5f3ff;--card:#fff;--card2:#fdf8ff;--border:#ede8ff;
+  --t1:#1c1040;--t2:#7c6faa;--t3:#b8a9e0;
+  --p:#7c4dff;--p2:#e040fb;--p3:#00e5ff;
+  --grad:linear-gradient(135deg,#7c4dff,#e040fb);
+  --grad2:linear-gradient(135deg,#00e5ff,#7c4dff);
+  --grad3:linear-gradient(135deg,#e040fb,#ff6d00);
+  --sh:0 8px 32px rgba(124,77,255,.14);
+  --sh2:0 2px 12px rgba(124,77,255,.10);
+  --r:22px;--rs:14px;
 }
-.dark {
-  --bg: #0d0b1e; --surface: #1a1535; --surface2: #221b40;
-  --border: #2d2060; --text: #f0e8ff; --text2: #9d89cc;
-  --shadow: 0 4px 24px rgba(124,77,255,.3);
+.dk{
+  --bg:#0e0b1f;--card:#16122e;--card2:#1d1840;--border:#2a2250;
+  --t1:#f0eaff;--t2:#9d89cc;--t3:#4a3f70;
+  --sh:0 8px 32px rgba(0,0,0,.4);
 }
-* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-body { font-family:'Nunito',sans-serif; background:var(--bg); color:var(--text);
-       min-height:100vh; transition:background .3s,color .3s; }
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(--t1);
+     min-height:100vh;transition:background .25s,color .25s;overscroll-behavior:none;}
 
-/* ── Brand ─────────────────────────────────────── */
-.brand { font-family:'Fredoka One',cursive; }
+/* HERO HEADER */
+.hero{
+  background:var(--grad);
+  padding:0 0 36px;
+  position:relative;overflow:hidden;
+}
+.hero-blur{
+  position:absolute;width:220px;height:220px;border-radius:50%;
+  background:rgba(255,255,255,.08);top:-60px;right:-60px;pointer-events:none;
+}
+.hero-blur2{
+  position:absolute;width:140px;height:140px;border-radius:50%;
+  background:rgba(255,255,255,.06);bottom:-40px;left:20px;pointer-events:none;
+}
+.hero-top{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:16px 18px 0;
+}
+.brand{
+  font-family:'Syne',sans-serif;font-weight:800;font-size:1.45rem;
+  color:#fff;letter-spacing:-.02em;
+}
+.brand span{opacity:.7;font-size:.9em;}
+.theme-btn{
+  background:rgba(255,255,255,.18);border:none;border-radius:99px;
+  padding:7px 13px;color:#fff;cursor:pointer;font-size:.9rem;
+  backdrop-filter:blur(8px);
+}
 
-/* ── Header ─────────────────────────────────────── */
-.header {
-  background: var(--grad);
-  padding: 20px 20px 28px;
-  position: relative; overflow: hidden;
+/* USER PROFILE CARD in hero */
+.profile-hero{
+  display:flex;align-items:center;gap:14px;
+  margin:18px 18px 0;
+  background:rgba(255,255,255,.15);
+  border-radius:var(--rs);padding:14px 16px;
+  backdrop-filter:blur(12px);
 }
-.header::after {
-  content:''; position:absolute; bottom:-20px; left:0; right:0;
-  height:40px; background:var(--bg); border-radius:50% 50% 0 0;
-  transition: background .3s;
+.avatar-wrap{position:relative;flex-shrink:0;}
+.avatar-img{
+  width:54px;height:54px;border-radius:50%;
+  border:3px solid rgba(255,255,255,.6);
+  object-fit:cover;display:block;
+  background:rgba(255,255,255,.2);
 }
-.header-top { display:flex; justify-content:space-between; align-items:center; }
-.header h1 { font-family:'Fredoka One',cursive; font-size:1.6rem; color:#fff; }
-.theme-btn {
-  background:rgba(255,255,255,.2); border:none; border-radius:99px;
-  padding:6px 12px; color:#fff; cursor:pointer; font-size:1rem;
+.avatar-fallback{
+  width:54px;height:54px;border-radius:50%;
+  border:3px solid rgba(255,255,255,.6);
+  background:rgba(255,255,255,.25);
+  display:flex;align-items:center;justify-content:center;
+  font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;color:#fff;
 }
-.user-pill {
-  display:inline-flex; align-items:center; gap:8px; margin-top:12px;
-  background:rgba(255,255,255,.2); border-radius:99px; padding:6px 14px;
+.avatar-online{
+  position:absolute;bottom:2px;right:2px;
+  width:12px;height:12px;border-radius:50%;
+  background:#00e676;border:2px solid rgba(255,255,255,.8);
 }
-.avatar {
-  width:32px; height:32px; border-radius:50%;
-  background:rgba(255,255,255,.3);
-  display:flex; align-items:center; justify-content:center;
-  font-weight:800; color:#fff; font-size:.85rem;
+.profile-info{flex:1;min-width:0;}
+.profile-name{
+  font-family:'Syne',sans-serif;font-weight:800;font-size:1rem;
+  color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
-.user-pill span { color:#fff; font-size:.85rem; font-weight:700; }
+.profile-sub{font-size:.72rem;color:rgba(255,255,255,.75);margin-top:2px;}
+.profile-badge{
+  background:rgba(255,255,255,.2);border-radius:99px;
+  padding:3px 10px;font-size:.68rem;font-weight:700;color:#fff;
+  white-space:nowrap;
+}
 
-/* ── Stats strip ─────────────────────────────────── */
-.stats-strip {
-  display:flex; gap:10px; padding:20px 16px 8px;
-  overflow-x:auto; -webkit-overflow-scrolling:touch;
+/* STATS SCROLL */
+.stats-row{
+  display:flex;gap:10px;padding:18px 18px 0;
+  overflow-x:auto;-webkit-overflow-scrolling:touch;
 }
-.stats-strip::-webkit-scrollbar { display:none; }
-.stat-pill {
-  flex-shrink:0; background:var(--surface); border:1px solid var(--border);
-  border-radius:99px; padding:10px 18px; text-align:center;
-  box-shadow: var(--shadow);
+.stats-row::-webkit-scrollbar{display:none;}
+.stat-card{
+  flex-shrink:0;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--rs);padding:14px 18px;min-width:90px;text-align:center;
+  box-shadow:var(--sh2);
 }
-.stat-pill .num { font-family:'Fredoka One',cursive; font-size:1.3rem;
-  background:var(--grad); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
-.stat-pill .lbl { font-size:.68rem; color:var(--text2); margin-top:1px; }
+.stat-n{
+  font-family:'Syne',sans-serif;font-size:1.5rem;font-weight:800;
+  background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+.stat-l{font-size:.65rem;color:var(--t2);margin-top:2px;font-weight:600;}
 
-/* ── Tabs ────────────────────────────────────────── */
-.tabs {
-  display:flex; gap:6px; padding:4px 16px 12px;
-  overflow-x:auto; -webkit-overflow-scrolling:touch;
+/* TABS */
+.tabs-wrap{
+  display:flex;gap:8px;padding:16px 18px 0;
+  overflow-x:auto;-webkit-overflow-scrolling:touch;
 }
-.tabs::-webkit-scrollbar { display:none; }
-.tab {
-  flex-shrink:0; padding:8px 18px; border-radius:99px; cursor:pointer;
-  font-size:.8rem; font-weight:700; border:2px solid var(--border);
-  background:var(--surface); color:var(--text2); transition:all .2s;
+.tabs-wrap::-webkit-scrollbar{display:none;}
+.tab{
+  flex-shrink:0;padding:9px 18px;border-radius:99px;cursor:pointer;
+  font-size:.78rem;font-weight:700;border:1.5px solid var(--border);
+  background:var(--card);color:var(--t2);transition:all .2s;
+  white-space:nowrap;
 }
-.tab.active {
-  background:var(--grad); color:#fff; border-color:transparent;
+.tab.on{
+  background:var(--grad);color:#fff;border-color:transparent;
   box-shadow:0 4px 14px rgba(124,77,255,.35);
 }
 
-/* ── Pages ───────────────────────────────────────── */
-.page { display:none; padding:0 16px 100px; }
-.page.active { display:block; }
+/* PAGES */
+.page{display:none;padding:16px 18px 100px;}
+.page.on{display:block;}
 
-/* ── Section title ───────────────────────────────── */
-.sec { font-size:.75rem; font-weight:800; color:var(--accent);
-       text-transform:uppercase; letter-spacing:.08em; margin:16px 0 10px; }
+/* SECTION LABEL */
+.sl{
+  font-size:.7rem;font-weight:800;color:var(--p);
+  text-transform:uppercase;letter-spacing:.1em;margin:18px 0 10px;
+}
 
-/* ── Card ────────────────────────────────────────── */
-.card {
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:var(--radius); padding:18px; margin-bottom:12px;
-  box-shadow:var(--shadow);
+/* CARD */
+.card{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--r);padding:18px;margin-bottom:12px;
+  box-shadow:var(--sh2);
 }
-.card-row { display:flex; align-items:center; gap:12px; }
 
-/* ── Char card ───────────────────────────────────── */
-.char-card {
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:var(--radius); overflow:hidden; margin-bottom:14px;
-  box-shadow:var(--shadow);
+/* QUICK ACTION BUTTONS */
+.qa-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:4px;}
+.qa-btn{
+  background:var(--card);border:1.5px solid var(--border);
+  border-radius:var(--rs);padding:16px 10px;text-align:center;
+  cursor:pointer;transition:all .2s;box-shadow:var(--sh2);
 }
-.char-banner {
-  height:90px; display:flex; align-items:center; justify-content:center;
-  font-size:3rem; position:relative; overflow:hidden;
+.qa-btn:active{transform:scale(.96);}
+.qa-btn .qi{font-size:1.6rem;display:block;margin-bottom:6px;}
+.qa-btn .ql{font-size:.74rem;font-weight:700;color:var(--t1);}
+.qa-btn.primary{
+  background:var(--grad);border-color:transparent;
+  box-shadow:0 6px 20px rgba(124,77,255,.35);
 }
-.char-banner::before {
-  content:''; position:absolute; inset:0;
-  background:var(--grad2); opacity:.85;
-}
-.char-banner span { position:relative; z-index:1; }
-.char-body { padding:16px; }
-.char-name { font-family:'Fredoka One',cursive; font-size:1.1rem; }
-.char-tag  { font-size:.75rem; color:var(--text2); margin:3px 0 10px; }
+.qa-btn.primary .ql{color:#fff;}
 
-/* ── Progress bar ────────────────────────────────── */
-.prog-wrap { margin:8px 0; }
-.prog-meta { display:flex; justify-content:space-between;
-             font-size:.7rem; color:var(--text2); margin-bottom:5px; }
-.prog-bar  { height:8px; background:var(--border); border-radius:99px; overflow:hidden; }
-.prog-fill { height:100%; border-radius:99px; background:var(--grad); transition:width .7s; }
+/* CHARACTER CARD */
+.char-card{
+  background:var(--card);border:1.5px solid var(--border);
+  border-radius:var(--r);overflow:hidden;margin-bottom:14px;
+  box-shadow:var(--sh);transition:transform .2s;
+}
+.char-card:active{transform:scale(.99);}
+.char-banner{
+  height:86px;position:relative;overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
+}
+.char-banner::before{content:'';position:absolute;inset:0;background:var(--grad2);}
+.char-banner .ce{position:relative;z-index:1;font-size:2.8rem;}
+.char-body{padding:16px;}
+.char-name{font-family:'Syne',sans-serif;font-weight:800;font-size:1.05rem;}
+.char-tag{font-size:.72rem;color:var(--t2);margin:3px 0 10px;font-weight:500;}
 
-/* ── Button ──────────────────────────────────────── */
-.btn {
-  display:inline-flex; align-items:center; justify-content:center; gap:8px;
-  padding:12px 20px; border-radius:var(--radius-sm); border:none;
-  cursor:pointer; font-size:.88rem; font-weight:700; font-family:'Nunito',sans-serif;
-  transition:all .2s; -webkit-tap-highlight-color:transparent;
-}
-.btn:active { transform:scale(.96); }
-.btn-primary { background:var(--grad); color:#fff;
-               box-shadow:0 4px 14px rgba(124,77,255,.4); }
-.btn-outline { background:transparent; border:2px solid var(--accent); color:var(--accent); }
-.btn-block   { width:100%; margin-bottom:8px; }
+/* PROGRESS */
+.prog-w{margin:8px 0;}
+.prog-m{display:flex;justify-content:space-between;
+        font-size:.68rem;color:var(--t2);font-weight:600;margin-bottom:5px;}
+.prog-b{height:7px;background:var(--border);border-radius:99px;overflow:hidden;}
+.prog-f{height:100%;border-radius:99px;background:var(--grad);transition:width .7s;}
 
-/* ── Chat ────────────────────────────────────────── */
-.chat-header {
-  display:flex; align-items:center; gap:12px;
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:var(--radius); padding:14px; margin-bottom:12px;
+/* BUTTON */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  padding:13px 20px;border-radius:var(--rs);border:none;
+  cursor:pointer;font-size:.86rem;font-weight:700;
+  font-family:'Plus Jakarta Sans',sans-serif;
+  transition:all .18s;-webkit-tap-highlight-color:transparent;
 }
-.chat-avatar {
-  width:44px; height:44px; border-radius:50%;
-  background:var(--grad); display:flex; align-items:center;
-  justify-content:center; font-size:1.4rem; flex-shrink:0;
-}
-.chat-name { font-weight:800; font-size:.95rem; }
-.chat-mood { font-size:.72rem; color:var(--text2); margin-top:2px; }
-.chat-msgs {
-  height:calc(100vh - 340px); min-height:200px;
-  overflow-y:auto; display:flex; flex-direction:column; gap:10px; padding:4px 0 10px;
-}
-.chat-msgs::-webkit-scrollbar { width:3px; }
-.chat-msgs::-webkit-scrollbar-thumb { background:var(--border); border-radius:99px; }
-.msg { max-width:82%; padding:10px 14px; border-radius:18px;
-       font-size:.88rem; line-height:1.5; }
-.msg.user { background:var(--grad); color:#fff; align-self:flex-end;
-            border-bottom-right-radius:4px; }
-.msg.bot  { background:var(--surface2); border:1px solid var(--border);
-            align-self:flex-start; border-bottom-left-radius:4px; }
-.msg.typing { color:var(--text2); font-style:italic; }
-.chat-input-row { display:flex; gap:8px; margin-top:10px; }
-.chat-input {
-  flex:1; background:var(--surface); border:2px solid var(--border);
-  border-radius:var(--radius-sm); padding:11px 14px; color:var(--text);
-  font-size:.88rem; font-family:'Nunito',sans-serif; outline:none;
-  transition:border .2s;
-}
-.chat-input:focus { border-color:var(--accent); }
-.send-btn {
-  background:var(--grad); border:none; border-radius:var(--radius-sm);
-  padding:11px 16px; color:#fff; cursor:pointer; font-size:1.1rem;
-  box-shadow:0 4px 12px rgba(124,77,255,.4); transition:transform .15s;
-}
-.send-btn:active { transform:scale(.92); }
+.btn:active{transform:scale(.96);}
+.btn-p{background:var(--grad);color:#fff;box-shadow:0 4px 16px rgba(124,77,255,.4);}
+.btn-o{background:transparent;border:1.5px solid var(--p);color:var(--p);}
+.btn-bl{width:100%;margin-bottom:9px;}
 
-/* ── Leaderboard ─────────────────────────────────── */
-.lb-row {
-  display:flex; align-items:center; gap:12px;
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:var(--radius-sm); padding:14px; margin-bottom:8px;
-  box-shadow:var(--shadow);
+/* CHAT */
+.chat-hdr{
+  display:flex;align-items:center;gap:12px;
+  background:var(--card);border:1.5px solid var(--border);
+  border-radius:var(--r);padding:14px;margin-bottom:12px;
+  box-shadow:var(--sh2);
 }
-.lb-rank { font-size:1.4rem; width:34px; text-align:center; flex-shrink:0; }
-.lb-info { flex:1; }
-.lb-name { font-weight:800; font-size:.9rem; }
-.lb-sub  { font-size:.7rem; color:var(--text2); }
-.lb-score { font-family:'Fredoka One',cursive; font-size:1.1rem;
-            background:var(--grad); -webkit-background-clip:text;
-            -webkit-text-fill-color:transparent; }
+.chat-av{
+  width:44px;height:44px;border-radius:50%;
+  background:var(--grad);display:flex;align-items:center;
+  justify-content:center;font-size:1.5rem;flex-shrink:0;
+}
+.chat-nm{font-weight:800;font-size:.95rem;}
+.chat-md{font-size:.7rem;color:var(--t2);margin-top:2px;}
+.msgs{
+  height:calc(100vh - 350px);min-height:160px;
+  overflow-y:auto;display:flex;flex-direction:column;gap:10px;
+  padding:2px 0 8px;
+}
+.msgs::-webkit-scrollbar{width:3px;}
+.msgs::-webkit-scrollbar-thumb{background:var(--border);border-radius:99px;}
+.msg{max-width:82%;padding:10px 14px;border-radius:18px;font-size:.87rem;line-height:1.52;}
+.msg.u{
+  background:var(--grad);color:#fff;align-self:flex-end;
+  border-bottom-right-radius:4px;
+}
+.msg.b{
+  background:var(--card2);border:1.5px solid var(--border);
+  align-self:flex-start;border-bottom-left-radius:4px;
+}
+.msg.ty{color:var(--t2);font-style:italic;}
+.inp-row{display:flex;gap:8px;margin-top:10px;}
+.cinput{
+  flex:1;background:var(--card);border:1.5px solid var(--border);
+  border-radius:var(--rs);padding:12px 14px;color:var(--t1);
+  font-size:.86rem;font-family:'Plus Jakarta Sans',sans-serif;
+  outline:none;transition:border .2s;
+}
+.cinput:focus{border-color:var(--p);}
+.sbtn{
+  background:var(--grad);border:none;border-radius:var(--rs);
+  padding:12px 17px;color:#fff;cursor:pointer;font-size:1.1rem;
+  box-shadow:0 4px 14px rgba(124,77,255,.4);transition:transform .15s;
+}
+.sbtn:active{transform:scale(.9);}
 
-/* ── Badges ──────────────────────────────────────── */
-.badges-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
-.badge-item {
-  background:var(--surface); border:2px solid var(--border);
-  border-radius:var(--radius-sm); padding:14px 8px; text-align:center;
-  transition:all .2s;
+/* LEADERBOARD */
+.lb-row{
+  display:flex;align-items:center;gap:12px;
+  background:var(--card);border:1.5px solid var(--border);
+  border-radius:var(--rs);padding:13px 14px;margin-bottom:9px;
+  box-shadow:var(--sh2);
 }
-.badge-item.owned { border-color:var(--accent);
-                    background:linear-gradient(135deg,rgba(124,77,255,.08),rgba(255,64,129,.08)); }
-.badge-item.locked { opacity:.35; }
-.badge-emoji { font-size:1.8rem; }
-.badge-name  { font-size:.65rem; color:var(--text2); margin-top:5px; font-weight:700; }
+.lb-rk{font-size:1.4rem;width:32px;text-align:center;flex-shrink:0;}
+.lb-av{
+  width:36px;height:36px;border-radius:50%;
+  background:var(--grad);display:flex;align-items:center;
+  justify-content:center;font-weight:800;color:#fff;font-size:.85rem;flex-shrink:0;
+}
+.lb-inf{flex:1;min-width:0;}
+.lb-nm{font-weight:800;font-size:.88rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.lb-sb{font-size:.68rem;color:var(--t2);}
+.lb-sc{
+  font-family:'Syne',sans-serif;font-size:1.05rem;font-weight:800;
+  background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
 
-/* ── Profile inputs ──────────────────────────────── */
-.field-wrap { margin-bottom:12px; }
-.field-label { font-size:.75rem; color:var(--text2); font-weight:700;
-               margin-bottom:5px; display:block; }
-.field-input {
-  width:100%; background:var(--surface2); border:2px solid var(--border);
-  border-radius:var(--radius-sm); padding:11px 14px; color:var(--text);
-  font-size:.88rem; font-family:'Nunito',sans-serif; outline:none;
-  transition:border .2s;
+/* BADGES */
+.bdg-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+.bdg{
+  background:var(--card);border:1.5px solid var(--border);
+  border-radius:var(--rs);padding:14px 8px;text-align:center;transition:all .2s;
 }
-.field-input:focus { border-color:var(--accent); }
-select.field-input { cursor:pointer; }
+.bdg.owned{
+  border-color:var(--p);
+  background:linear-gradient(135deg,rgba(124,77,255,.07),rgba(224,64,251,.05));
+}
+.bdg.locked{opacity:.35;}
+.bdg .be{font-size:1.7rem;}
+.bdg .bn{font-size:.62rem;color:var(--t2);margin-top:5px;font-weight:700;}
 
-/* ── Spinner ─────────────────────────────────────── */
-.spinner {
-  width:24px; height:24px; border-radius:50%;
-  border:3px solid var(--border); border-top-color:var(--accent);
-  animation:spin .7s linear infinite; margin:24px auto;
+/* PROFILE INPUTS */
+.field{margin-bottom:12px;}
+.flbl{font-size:.72rem;font-weight:700;color:var(--t2);margin-bottom:5px;display:block;}
+.finput{
+  width:100%;background:var(--card2);border:1.5px solid var(--border);
+  border-radius:var(--rs);padding:12px 14px;color:var(--t1);
+  font-size:.86rem;font-family:'Plus Jakarta Sans',sans-serif;
+  outline:none;transition:border .2s;
 }
-@keyframes spin { to { transform:rotate(360deg); } }
+.finput:focus{border-color:var(--p);}
+select.finput{cursor:pointer;}
 
-/* ── Toast ───────────────────────────────────────── */
-#toast {
-  position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
-  background:var(--grad); color:#fff; padding:10px 22px; border-radius:99px;
-  font-size:.82rem; font-weight:700; opacity:0; transition:opacity .3s;
-  pointer-events:none; z-index:999; white-space:nowrap;
-  box-shadow:0 6px 20px rgba(124,77,255,.4);
+/* PROFILE AVATAR in profile tab */
+.prof-av-wrap{text-align:center;margin-bottom:20px;}
+.prof-av-big{
+  width:84px;height:84px;border-radius:50%;
+  border:3px solid var(--p);margin:0 auto;display:block;
+  object-fit:cover;background:var(--grad);
 }
-#toast.show { opacity:1; }
+.prof-av-fb{
+  width:84px;height:84px;border-radius:50%;
+  border:3px solid var(--p);margin:0 auto;
+  background:var(--grad);display:flex;align-items:center;
+  justify-content:center;font-family:'Syne',sans-serif;
+  font-size:2rem;font-weight:800;color:#fff;
+}
+.prof-name-big{
+  font-family:'Syne',sans-serif;font-weight:800;font-size:1.2rem;
+  text-align:center;margin-top:10px;
+}
+.prof-sub{font-size:.75rem;color:var(--t2);text-align:center;margin-top:3px;}
+
+/* SPINNER */
+.spin{
+  width:26px;height:26px;border-radius:50%;
+  border:3px solid var(--border);border-top-color:var(--p);
+  animation:sp .7s linear infinite;margin:28px auto;
+}
+@keyframes sp{to{transform:rotate(360deg);}}
+
+/* TOAST */
+#toast{
+  position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+  background:var(--grad);color:#fff;padding:11px 24px;border-radius:99px;
+  font-size:.8rem;font-weight:700;opacity:0;transition:opacity .28s;
+  pointer-events:none;z-index:999;white-space:nowrap;
+  box-shadow:0 8px 24px rgba(124,77,255,.45);
+}
+#toast.show{opacity:1;}
 </style>
 </head>
 <body>
 
-<div class="header">
-  <div class="header-top">
-    <h1 class="brand">✨ AI Bot</h1>
-    <button class="theme-btn" onclick="toggleTheme()" id="themeBtn">🌙</button>
+<!-- HEADER -->
+<div class="hero">
+  <div class="hero-blur"></div><div class="hero-blur2"></div>
+  <div class="hero-top">
+    <div class="brand">✦ AI<span>Bot</span></div>
+    <button class="theme-btn" id="tBtn" onclick="toggleTheme()">🌙</button>
   </div>
-  <div class="user-pill">
-    <div class="avatar" id="av">?</div>
-    <span id="uname">Loading...</span>
-  </div>
-  <div style="margin-top:8px;color:rgba(255,255,255,.8);font-size:.78rem" id="tagline">
-    ➵⋆🪐 ᴛᴇᴄʜɴɪᴄᴀʟ_sᴇʀᴇɴᴀ 𓂃
+  <!-- User Profile Row -->
+  <div class="profile-hero">
+    <div class="avatar-wrap">
+      <img id="heroAv" class="avatar-img" style="display:none" alt="">
+      <div id="heroFb" class="avatar-fallback">?</div>
+      <div class="avatar-online"></div>
+    </div>
+    <div class="profile-info">
+      <div class="profile-name" id="heroName">Loading...</div>
+      <div class="profile-sub" id="heroSub">@username • AI Bot</div>
+    </div>
+    <div class="profile-badge" id="heroBadge">⚡ Active</div>
   </div>
 </div>
 
-<div class="stats-strip" id="stats-strip">
-  <div class="stat-pill"><div class="num" id="s-today">—</div><div class="lbl">💬 Today</div></div>
-  <div class="stat-pill"><div class="num" id="s-total">—</div><div class="lbl">📨 Total</div></div>
-  <div class="stat-pill"><div class="num" id="s-badges">—</div><div class="lbl">🎖️ Badges</div></div>
-  <div class="stat-pill"><div class="num" id="s-rel">—</div><div class="lbl">💞 Best Rel</div></div>
+<!-- STATS -->
+<div class="stats-row">
+  <div class="stat-card"><div class="stat-n" id="sToday">—</div><div class="stat-l">💬 Today</div></div>
+  <div class="stat-card"><div class="stat-n" id="sTotal">—</div><div class="stat-l">📨 Total</div></div>
+  <div class="stat-card"><div class="stat-n" id="sBdg">—</div><div class="stat-l">🎖️ Badges</div></div>
+  <div class="stat-card"><div class="stat-n" id="sRel">—</div><div class="stat-l">💞 Rel</div></div>
 </div>
 
-<div class="tabs">
-  <div class="tab active"  onclick="sw('home')">🏠 Home</div>
-  <div class="tab"         onclick="sw('chat')">💬 Chat</div>
-  <div class="tab"         onclick="sw('companions')">💞 Companions</div>
-  <div class="tab"         onclick="sw('profile')">👤 Profile</div>
-  <div class="tab"         onclick="sw('top')">🏆 Top</div>
-  <div class="tab"         onclick="sw('badges')">🎖️ Badges</div>
+<!-- TABS -->
+<div class="tabs-wrap">
+  <div class="tab on"  onclick="sw('home')">🏠 Home</div>
+  <div class="tab"     onclick="sw('chat')">💬 Chat</div>
+  <div class="tab"     onclick="sw('chars')">💞 Companions</div>
+  <div class="tab"     onclick="sw('prof')">👤 Profile</div>
+  <div class="tab"     onclick="sw('top')">🏆 Top</div>
+  <div class="tab"     onclick="sw('bdgs')">🎖️ Badges</div>
 </div>
 
 <!-- HOME -->
-<div class="page active" id="page-home">
-  <div class="sec">⚡ Quick Actions</div>
-  <button class="btn btn-primary btn-block" onclick="sw('chat')">💬 AI Se Baat Karo</button>
-  <button class="btn btn-outline btn-block" onclick="sw('companions')">💞 Companions Browse Karo</button>
-
-  <div class="sec">🏆 Top 3</div>
-  <div id="home-lb"><div class="spinner"></div></div>
+<div class="page on" id="pg-home">
+  <div class="sl">⚡ Quick Actions</div>
+  <div class="qa-grid">
+    <div class="qa-btn primary" onclick="sw('chat')">
+      <span class="qi">💬</span><span class="ql">Chat with AI</span>
+    </div>
+    <div class="qa-btn" onclick="sw('chars')">
+      <span class="qi">💞</span><span class="ql">Companions</span>
+    </div>
+    <div class="qa-btn" onclick="sw('prof')">
+      <span class="qi">👤</span><span class="ql">My Profile</span>
+    </div>
+    <div class="qa-btn" onclick="sw('top')">
+      <span class="qi">🏆</span><span class="ql">Leaderboard</span>
+    </div>
+  </div>
+  <div class="sl">🏆 Top 3</div>
+  <div id="homeLb"><div class="spin"></div></div>
 </div>
 
 <!-- CHAT -->
-<div class="page" id="page-chat">
-  <div class="chat-header">
-    <div class="chat-avatar" id="chat-av">🤖</div>
+<div class="page" id="pg-chat">
+  <div class="chat-hdr">
+    <div class="chat-av" id="cAv">🤖</div>
     <div>
-      <div class="chat-name" id="chat-cname">AI Assistant</div>
-      <div class="chat-mood" id="chat-cmood">Ready to chat!</div>
+      <div class="chat-nm" id="cName">AI Assistant</div>
+      <div class="chat-md" id="cMood">Ready to chat!</div>
     </div>
-    <button class="btn btn-outline" style="padding:7px 12px;font-size:.72rem;margin-left:auto"
-            onclick="sw('companions')">Change</button>
+    <button class="btn btn-o" style="padding:7px 12px;font-size:.72rem;margin-left:auto"
+            onclick="sw('chars')">Change</button>
   </div>
-  <div class="chat-msgs" id="chat-msgs"></div>
-  <div class="chat-input-row">
-    <input class="chat-input" id="cin" placeholder="Kuch bhi likhо..."
-           autocomplete="off" onkeydown="if(e=>e.key==='Enter',event)sendChat()">
-    <button class="send-btn" onclick="sendChat()">➤</button>
+  <div class="msgs" id="msgs"></div>
+  <div class="inp-row">
+    <input class="cinput" id="cin" placeholder="Kuch bhi likho..."
+           autocomplete="off"
+           onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}">
+    <button class="sbtn" onclick="sendChat()">➤</button>
   </div>
 </div>
 
 <!-- COMPANIONS -->
-<div class="page" id="page-companions">
-  <div class="sec">💞 AI Companions</div>
-  <div id="chars-list"><div class="spinner"></div></div>
+<div class="page" id="pg-chars">
+  <div class="sl">💞 AI Companions</div>
+  <div id="charList"><div class="spin"></div></div>
 </div>
 
 <!-- PROFILE -->
-<div class="page" id="page-profile">
+<div class="page" id="pg-prof">
   <div class="card">
-    <div class="sec" style="margin-top:0">👤 Edit Profile</div>
-    <div id="prof-fields"><div class="spinner"></div></div>
-    <button class="btn btn-primary btn-block" onclick="saveProfile()" style="margin-top:14px">
+    <div class="prof-av-wrap">
+      <img id="profAv" class="prof-av-big" style="display:none" alt="">
+      <div id="profFb" class="prof-av-fb">?</div>
+      <div class="prof-name-big" id="profName">—</div>
+      <div class="prof-sub" id="profSub">Telegram User</div>
+    </div>
+    <div id="profFields"><div class="spin"></div></div>
+    <button class="btn btn-p btn-bl" onclick="saveProfile()" style="margin-top:14px">
       💾 Save Profile
     </button>
   </div>
 </div>
 
 <!-- LEADERBOARD -->
-<div class="page" id="page-top">
-  <div class="sec">🏆 Leaderboard</div>
-  <div id="lb-list"><div class="spinner"></div></div>
+<div class="page" id="pg-top">
+  <div class="sl">🏆 Leaderboard</div>
+  <div id="lbList"><div class="spin"></div></div>
 </div>
 
 <!-- BADGES -->
-<div class="page" id="page-badges">
-  <div class="sec">🎖️ Tumhare Badges</div>
-  <div id="badges-prog" style="margin-bottom:16px"></div>
-  <div class="badges-grid" id="badges-grid"></div>
+<div class="page" id="pg-bdgs">
+  <div class="sl">🎖️ Badges</div>
+  <div id="bdgProg" style="margin-bottom:16px"></div>
+  <div class="bdg-grid" id="bdgGrid"></div>
 </div>
 
 <div id="toast"></div>
 
 <script>
-const tg    = window.Telegram?.WebApp;
-const tgU   = tg?.initDataUnsafe?.user || {};
-const API   = '';
-let currentChar = null, chatHistory = [], isDark = false;
+const tg  = window.Telegram?.WebApp;
+const tgU = tg?.initDataUnsafe?.user || {};
+const API = '';
 
-if (tg) { tg.expand(); tg.ready(); }
+if(tg){tg.expand();tg.ready();}
 
-// Theme
-function toggleTheme() {
-  isDark = !isDark;
-  document.body.classList.toggle('dark', isDark);
-  document.getElementById('themeBtn').textContent = isDark ? '☀️' : '🌙';
-  localStorage.setItem('theme', isDark ? 'dark' : 'light');
+// ── Theme ─────────────────────────────────────────────
+let dk = localStorage.getItem('theme')==='dk';
+function applyTheme(){document.body.classList.toggle('dk',dk);}
+function toggleTheme(){dk=!dk;localStorage.setItem('theme',dk?'dk':'lt');applyTheme();document.getElementById('tBtn').textContent=dk?'☀️':'🌙';}
+applyTheme();
+if(dk)document.getElementById('tBtn').textContent='☀️';
+
+// ── User profile photo ─────────────────────────────────
+const uid   = tgU.id    || 0;
+const uname = tgU.first_name || 'User';
+const uuser = tgU.username  || '';
+
+document.getElementById('heroName').textContent = uname;
+document.getElementById('heroSub').textContent  = uuser ? `@${uuser} • AI Bot` : 'AI Bot User';
+document.getElementById('heroFb').textContent   = uname[0].toUpperCase();
+document.getElementById('profName').textContent = uname;
+document.getElementById('profSub').textContent  = uuser ? `@${uuser}` : 'Telegram User';
+document.getElementById('profFb').textContent   = uname[0].toUpperCase();
+
+// Try to get Telegram profile photo via API
+async function loadUserPhoto(){
+  try{
+    const r = await fetch(`${API}/api/me?uid=${uid}`);
+    const d = await r.json();
+    if(d.photo_url){
+      // Show photo in hero
+      const hImg = document.getElementById('heroAv');
+      hImg.src = d.photo_url;
+      hImg.onload = ()=>{hImg.style.display='block';document.getElementById('heroFb').style.display='none';};
+      // Show photo in profile tab
+      const pImg = document.getElementById('profAv');
+      pImg.src = d.photo_url;
+      pImg.onload = ()=>{pImg.style.display='block';document.getElementById('profFb').style.display='none';};
+    }
+    // Stats
+    document.getElementById('sToday').textContent = d.today  ?? '—';
+    document.getElementById('sTotal').textContent = d.total  ?? '—';
+    document.getElementById('sBdg').textContent   = d.badges ?? '—';
+    document.getElementById('sRel').textContent   = d.best_rel ?? '—';
+    if(d.badges > 0) document.getElementById('heroBadge').textContent = `🎖️ ${d.badges} Badges`;
+  }catch(e){}
 }
-if (localStorage.getItem('theme') === 'dark') toggleTheme();
+loadUserPhoto();
 
-// User init
-document.getElementById('uname').textContent = tgU.first_name || 'User';
-document.getElementById('av').textContent     = (tgU.first_name || 'U')[0].toUpperCase();
+// ── Helpers ───────────────────────────────────────────
+async function GET(p){const r=await fetch(`${API}${p}?uid=${uid}`);return r.json();}
+async function POST(p,b){const r=await fetch(`${API}${p}?uid=${uid}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json();}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function toast(m){const e=document.getElementById('toast');e.textContent=m;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2500);}
+function relLabel(p){if(p<5)return'👋 Strangers';if(p<15)return'🙂 Acquaintances';if(p<30)return'😊 Friends';if(p<60)return'🥰 Close Friends';if(p<100)return'💕 Best Friends';return'💞 Soulmates';}
 
-// Tab switch
-function sw(name) {
-  document.querySelectorAll('.tab').forEach((t,i) => {
-    t.classList.toggle('active', ['home','chat','companions','profile','top','badges'][i] === name);
-  });
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.getElementById('page-' + name).classList.add('active');
-  const loaders = {companions: loadChars, profile: loadProfile,
-                   top: loadTop, badges: loadBadges, home: loadHome};
-  if (loaders[name]) loaders[name]();
-  if (name === 'chat') scrollMsgs();
+// ── Tabs ──────────────────────────────────────────────
+const TABS=['home','chat','chars','prof','top','bdgs'];
+function sw(n){
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',TABS[i]===n));
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+  document.getElementById('pg-'+n).classList.add('on');
+  ({chars:loadChars,prof:loadProf,top:loadTop,bdgs:loadBdgs,home:loadHome})[n]?.();
+  if(n==='chat')scrollMsgs();
 }
 
-// API helpers
-const uid = tgU.id || 0;
-async function GET(path) {
-  const r = await fetch(`${API}${path}?uid=${uid}`);
-  return r.json();
-}
-async function POST(path, body) {
-  const r = await fetch(`${API}${path}?uid=${uid}`, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body),
-  });
-  return r.json();
-}
-
-function toast(msg) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2500);
-}
-
-function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-function relLabel(pts) {
-  if(pts<5)   return '👋 Strangers';
-  if(pts<15)  return '🙂 Acquaintances';
-  if(pts<30)  return '😊 Friends';
-  if(pts<60)  return '🥰 Close Friends';
-  if(pts<100) return '💕 Best Friends';
-  return '💞 Soulmates';
-}
-
-// Load home
-async function loadHome() {
-  try {
-    const d = await GET('/api/me');
-    document.getElementById('s-today').textContent  = d.today   ?? '—';
-    document.getElementById('s-total').textContent  = d.total   ?? '—';
-    document.getElementById('s-badges').textContent = d.badges  ?? '—';
-    document.getElementById('s-rel').textContent    = d.best_rel ?? '—';
-    const lb = await GET('/api/leaderboard');
-    const medals = ['🥇','🥈','🥉'];
-    document.getElementById('home-lb').innerHTML =
-      (lb.data || []).slice(0,3).map((u,i) =>
+// ── Home ──────────────────────────────────────────────
+async function loadHome(){
+  try{
+    const lb=await GET('/api/leaderboard');
+    const medals=['🥇','🥈','🥉'];
+    document.getElementById('homeLb').innerHTML=
+      (lb.data||[]).slice(0,3).map((u,i)=>
         `<div class="lb-row">
-          <div class="lb-rank">${medals[i]}</div>
-          <div class="lb-info"><div class="lb-name">${esc(u.name)}</div></div>
-          <div class="lb-score">${u.total}</div>
+          <div class="lb-rk">${medals[i]}</div>
+          <div class="lb-av">${esc((u.name||'?')[0].toUpperCase())}</div>
+          <div class="lb-inf"><div class="lb-nm">${esc(u.name)}</div><div class="lb-sb">Today: ${u.today}</div></div>
+          <div class="lb-sc">${u.total}</div>
         </div>`
-      ).join('') || '<div style="color:var(--text2);padding:10px">No data yet.</div>';
-  } catch(e){}
+      ).join('')||'<div style="color:var(--t2);padding:12px">No data yet.</div>';
+  }catch(e){}
 }
 
-// Load characters
-const EMOJIS = ['🌸','😏','📚','💻','🎨'];
-async function loadChars() {
-  try {
-    const d = await GET('/api/characters');
-    document.getElementById('chars-list').innerHTML =
-      (d.characters || []).map((c,i) => {
-        const pts = c.relationship || 0;
-        const pct = Math.min(100, pts);
-        return `<div class="char-card">
-          <div class="char-banner"><span>${EMOJIS[i%EMOJIS.length]}</span></div>
+// ── Chars ─────────────────────────────────────────────
+const EMOJIS=['🌸','😏','📚','💻','🎨'];
+async function loadChars(){
+  try{
+    const d=await GET('/api/characters');
+    document.getElementById('charList').innerHTML=
+      (d.characters||[]).map((c,i)=>{
+        const pts=c.relationship||0,pct=Math.min(100,pts);
+        return`<div class="char-card">
+          <div class="char-banner"><span class="ce">${EMOJIS[i%5]}</span></div>
           <div class="char-body">
             <div class="char-name">${esc(c.name)}, ${c.age}</div>
             <div class="char-tag">${esc(c.tagline)}</div>
-            <div class="prog-wrap">
-              <div class="prog-meta"><span>${relLabel(pts)}</span><span>${pts} pts</span></div>
-              <div class="prog-bar"><div class="prog-fill" style="width:${pct}%"></div></div>
+            <div class="prog-w">
+              <div class="prog-m"><span>${relLabel(pts)}</span><span>${pts} pts</span></div>
+              <div class="prog-b"><div class="prog-f" style="width:${pct}%"></div></div>
             </div>
-            <div style="font-size:.75rem;color:var(--text2);margin-bottom:10px">Mood: ${esc(c.mood||'')}</div>
-            <button class="btn btn-primary btn-block"
-                    onclick='selectChar(${JSON.stringify(c).replace(/\"/g,"&quot;")})'>
+            <div style="font-size:.72rem;color:var(--t2);margin-bottom:10px;font-weight:600">Mood: ${esc(c.mood||'')}</div>
+            <button class="btn btn-p btn-bl" onclick='selChar(${JSON.stringify(c).replace(/"/g,"&quot;")})'>
               💬 Chat with ${esc(c.name)}
             </button>
           </div>
         </div>`;
       }).join('');
-  } catch(e) {
-    document.getElementById('chars-list').innerHTML = '<div class="card">Could not load.</div>';
-  }
+  }catch(e){document.getElementById('charList').innerHTML='<div class="card" style="color:var(--t2)">Could not load.</div>';}
 }
 
-function selectChar(c) {
-  currentChar = c; chatHistory = [];
-  document.getElementById('chat-av').textContent    = EMOJIS[['aria','zara','riya','neo','luna'].indexOf(c.id) % EMOJIS.length] || '💞';
-  document.getElementById('chat-cname').textContent = `${c.name}, ${c.age}`;
-  document.getElementById('chat-cmood').textContent = `Mood: ${c.mood || 'Ready!'}`;
-  document.getElementById('chat-msgs').innerHTML    = '';
-  addMsg('bot', `💞 Hey! I'm ${c.name}. ${c.intro}`);
+// ── Chat ──────────────────────────────────────────────
+let curChar=null,chatHist=[];
+const emojiMap={'aria':'🌸','zara':'😏','riya':'📚','neo':'💻','luna':'🎨'};
+
+function selChar(c){
+  curChar=c;chatHist=[];
+  document.getElementById('cAv').textContent=emojiMap[c.id]||'💞';
+  document.getElementById('cName').textContent=`${c.name}, ${c.age}`;
+  document.getElementById('cMood').textContent=`Mood: ${c.mood||'Ready!'}`;
+  document.getElementById('msgs').innerHTML='';
+  addMsg('b',`${emojiMap[c.id]||'💞'} Hey! I'm ${c.name}. ${c.intro}`);
   sw('chat');
 }
-
-// Chat
-function addMsg(role, text) {
-  const w = document.getElementById('chat-msgs');
-  const d = document.createElement('div');
-  d.className = `msg ${role}`;
-  d.textContent = text;
-  w.appendChild(d);
-  scrollMsgs();
+function addMsg(r,t){
+  const w=document.getElementById('msgs'),d=document.createElement('div');
+  d.className=`msg ${r}`;d.textContent=t;w.appendChild(d);scrollMsgs();
 }
-function scrollMsgs() {
-  const w = document.getElementById('chat-msgs');
-  if(w) setTimeout(() => w.scrollTop = w.scrollHeight, 60);
-}
-async function sendChat() {
-  const inp  = document.getElementById('cin');
-  const text = inp.value.trim();
-  if(!text) return;
-  inp.value = '';
-  addMsg('user', text);
-  chatHistory.push({role:'user', content:text});
-
-  const w = document.getElementById('chat-msgs');
-  const t = document.createElement('div');
-  t.className = 'msg bot typing'; t.id = 'typ'; t.textContent = '● ● ●';
-  w.appendChild(t); scrollMsgs();
-
-  try {
-    const d = await POST('/api/chat', {
-      message: text, history: chatHistory.slice(-10),
-      character: currentChar?.id || null,
-    });
+function scrollMsgs(){const w=document.getElementById('msgs');if(w)setTimeout(()=>w.scrollTop=w.scrollHeight,60);}
+async function sendChat(){
+  const inp=document.getElementById('cin'),text=inp.value.trim();
+  if(!text)return;inp.value='';
+  addMsg('u',text);chatHist.push({role:'user',content:text});
+  const w=document.getElementById('msgs');
+  const t=document.createElement('div');
+  t.className='msg b ty';t.id='typ';t.textContent='● ● ●';
+  w.appendChild(t);scrollMsgs();
+  try{
+    const d=await POST('/api/chat',{message:text,history:chatHist.slice(-10),character:curChar?.id||null});
     document.getElementById('typ')?.remove();
-    const r = d.reply || '❌ No response';
-    addMsg('bot', r);
-    chatHistory.push({role:'assistant', content:r});
-    if(d.new_badges?.length) toast(`🎉 Badge: ${d.new_badges[0]}`);
-  } catch(e) {
-    document.getElementById('typ')?.remove();
-    addMsg('bot', '❌ Error. Please try again.');
-  }
+    const r=d.reply||'❌ No response';
+    addMsg('b',r);chatHist.push({role:'assistant',content:r});
+    if(d.new_badges?.length)toast(`🎉 Badge: ${d.new_badges[0]}`);
+  }catch(e){document.getElementById('typ')?.remove();addMsg('b','❌ Error.');}
 }
 
-// Profile
-async function loadProfile() {
-  try {
-    const d = await GET('/api/me');
-    const p = d.profile || {};
-    const fields = [
-      {k:'name', l:'👤 Name', t:'text'},
-      {k:'age',  l:'🎂 Age',  t:'number'},
-      {k:'bio',  l:'📝 Bio',  t:'text'},
-      {k:'mood', l:'😊 Mood', t:'text'},
-    ];
-    document.getElementById('prof-fields').innerHTML =
-      fields.map(f =>
-        `<div class="field-wrap">
-          <label class="field-label">${f.l}</label>
-          <input class="field-input" id="p-${f.k}" type="${f.t}"
-                 value="${esc(p[f.k]||'')}" placeholder="${f.l}...">
-        </div>`
-      ).join('') +
-      `<div class="field-wrap">
-        <label class="field-label">⭐ Zodiac</label>
-        <select class="field-input" id="p-zodiac">
-          <option value="">Select...</option>
-          ${['Aries','Taurus','Gemini','Cancer','Leo','Virgo','Libra',
-             'Scorpio','Sagittarius','Capricorn','Aquarius','Pisces']
-            .map(s=>`<option ${p.zodiac===s?'selected':''}>${s}</option>`).join('')}
-        </select>
-      </div>
-      <div class="field-wrap">
-        <label class="field-label">🌐 Language</label>
-        <select class="field-input" id="p-lang">
-          ${['Hinglish','Hindi','English'].map(l=>
-            `<option ${(p.lang||'Hinglish')===l?'selected':''}>${l}</option>`).join('')}
-        </select>
-      </div>`;
-  } catch(e){}
+// ── Profile ───────────────────────────────────────────
+async function loadProf(){
+  try{
+    const d=await GET('/api/me');
+    const p=d.profile||{};
+    const fields=[{k:'name',l:'👤 Name',t:'text'},{k:'age',l:'🎂 Age',t:'number'},
+                  {k:'bio',l:'📝 Bio',t:'text'},{k:'mood',l:'😊 Mood',t:'text'}];
+    document.getElementById('profFields').innerHTML=
+      fields.map(f=>`<div class="field">
+        <label class="flbl">${f.l}</label>
+        <input class="finput" id="p-${f.k}" type="${f.t}" value="${esc(p[f.k]||'')}" placeholder="${f.l}...">
+      </div>`).join('')+
+      `<div class="field"><label class="flbl">⭐ Zodiac</label>
+      <select class="finput" id="p-zodiac">
+        <option value="">Select...</option>
+        ${['Aries','Taurus','Gemini','Cancer','Leo','Virgo','Libra','Scorpio','Sagittarius','Capricorn','Aquarius','Pisces'].map(s=>`<option${p.zodiac===s?' selected':''}>${s}</option>`).join('')}
+      </select></div>
+      <div class="field"><label class="flbl">🌐 Language</label>
+      <select class="finput" id="p-lang">
+        ${['Hinglish','Hindi','English'].map(l=>`<option${(p.lang||'Hinglish')===l?' selected':''}>${l}</option>`).join('')}
+      </select></div>`;
+  }catch(e){}
 }
-
-async function saveProfile() {
-  const data = {
-    name:   document.getElementById('p-name')?.value.trim()||'',
-    age:    document.getElementById('p-age')?.value.trim()||'',
-    bio:    document.getElementById('p-bio')?.value.trim()||'',
-    mood:   document.getElementById('p-mood')?.value.trim()||'',
-    zodiac: document.getElementById('p-zodiac')?.value||'',
-    lang:   document.getElementById('p-lang')?.value||'Hinglish',
-  };
-  try {
-    await POST('/api/profile', data);
+async function saveProfile(){
+  const data={name:document.getElementById('p-name')?.value.trim()||'',
+    age:document.getElementById('p-age')?.value.trim()||'',
+    bio:document.getElementById('p-bio')?.value.trim()||'',
+    mood:document.getElementById('p-mood')?.value.trim()||'',
+    zodiac:document.getElementById('p-zodiac')?.value||'',
+    lang:document.getElementById('p-lang')?.value||'Hinglish'};
+  try{
+    await POST('/api/profile',data);
     toast('✅ Profile saved!');
-    if(tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-  } catch(e) { toast('❌ Save failed'); }
+    if(tg?.HapticFeedback)tg.HapticFeedback.notificationOccurred('success');
+    // Update hero name if changed
+    if(data.name){document.getElementById('heroName').textContent=data.name;document.getElementById('profName').textContent=data.name;}
+  }catch(e){toast('❌ Failed');}
 }
 
-// Leaderboard
-async function loadTop() {
-  try {
-    const d = await GET('/api/leaderboard');
-    const medals = ['🥇','🥈','🥉'];
-    document.getElementById('lb-list').innerHTML =
+// ── Leaderboard ───────────────────────────────────────
+async function loadTop(){
+  try{
+    const d=await GET('/api/leaderboard');
+    const medals=['🥇','🥈','🥉'];
+    document.getElementById('lbList').innerHTML=
       (d.data||[]).map((u,i)=>
         `<div class="lb-row">
-          <div class="lb-rank">${medals[i]||'#'+(i+1)}</div>
-          <div class="lb-info">
-            <div class="lb-name">${esc(u.name)}</div>
-            <div class="lb-sub">Today: ${u.today} msgs</div>
-          </div>
-          <div class="lb-score">${u.total}</div>
+          <div class="lb-rk">${medals[i]||'#'+(i+1)}</div>
+          <div class="lb-av">${esc((u.name||'?')[0].toUpperCase())}</div>
+          <div class="lb-inf"><div class="lb-nm">${esc(u.name)}</div><div class="lb-sb">Today: ${u.today}</div></div>
+          <div class="lb-sc">${u.total}</div>
         </div>`
-      ).join('') || '<div style="color:var(--text2);padding:14px">No data yet.</div>';
-  } catch(e){}
+      ).join('')||'<div style="color:var(--t2);padding:14px">No data yet.</div>';
+  }catch(e){}
 }
 
-// Badges
-async function loadBadges() {
-  try {
-    const d     = await GET('/api/badges');
-    const owned = new Set(d.owned||[]);
-    const all   = d.all||[];
-    const pct   = all.length ? Math.round(owned.size/all.length*100) : 0;
-    document.getElementById('badges-prog').innerHTML =
-      `<div class="prog-wrap">
-        <div class="prog-meta"><span>Progress</span><span>${owned.size}/${all.length}</span></div>
-        <div class="prog-bar"><div class="prog-fill" style="width:${pct}%"></div></div>
-      </div>`;
-    document.getElementById('badges-grid').innerHTML =
-      all.map(b =>
-        `<div class="badge-item ${owned.has(b.key)?'owned':'locked'}">
-          <div class="badge-emoji">${b.emoji}</div>
-          <div class="badge-name">${esc(b.name)}</div>
-          ${owned.has(b.key)?'':'<div style="font-size:.6rem;color:var(--text2)">🔒</div>'}
-        </div>`
-      ).join('');
-  } catch(e){}
+// ── Badges ────────────────────────────────────────────
+async function loadBdgs(){
+  try{
+    const d=await GET('/api/badges');
+    const owned=new Set(d.owned||[]),all=d.all||[];
+    const pct=all.length?Math.round(owned.size/all.length*100):0;
+    document.getElementById('bdgProg').innerHTML=
+      `<div class="prog-w"><div class="prog-m"><span>Progress</span><span>${owned.size}/${all.length}</span></div>
+      <div class="prog-b"><div class="prog-f" style="width:${pct}%"></div></div></div>`;
+    document.getElementById('bdgGrid').innerHTML=
+      all.map(b=>`<div class="bdg ${owned.has(b.key)?'owned':'locked'}">
+        <div class="be">${b.emoji}</div>
+        <div class="bn">${esc(b.name)}</div>
+        ${owned.has(b.key)?'':'<div style="font-size:.58rem;color:var(--t3)">🔒</div>'}
+      </div>`).join('');
+  }catch(e){}
 }
 
 // Init
@@ -1802,8 +1873,21 @@ async def api_me(uid: int = 0):
     bdgs   = db.get_badges(uid)
     rels   = db._relationships.get(uid, {})
     best_r = max(rels.values()) if rels else 0
+
+    # Try to get Telegram profile photo URL
+    photo_url = None
+    if _ptb_app:
+        try:
+            photos = await _ptb_app.bot.get_user_profile_photos(uid, limit=1)
+            if photos.photos:
+                file = await _ptb_app.bot.get_file(photos.photos[0][0].file_id)
+                photo_url = f"https://api.telegram.org/file/bot{config.TELEGRAM_BOT_TOKEN}/{file.file_path}"
+        except Exception:
+            pass
+
     return JSONResponse({"today": db.get_usage_today(uid), "total": db.get_total_messages(uid),
-                         "badges": len(bdgs), "best_rel": best_r, "profile": prof})
+                         "badges": len(bdgs), "best_rel": best_r, "profile": prof,
+                         "photo_url": photo_url})
 
 
 @web_app.get("/api/leaderboard")

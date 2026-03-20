@@ -12,8 +12,8 @@ PORT = int(os.environ.get("PORT", 10000))
 OWNER_IDS: set[int]       = {1598576202, 6518065496}
 OWNER_USERNAMES: set[str] = {"xioqui_xin", "technicalserena"}
 OWNER_CONTACTS            = [
-    ("👑 TechnicalSerena", "https://t.me/Technical_serena"),
-    ("👑 Xioqui_xin",      "https://t.me/Xioqui_xin"),
+    ("👑 @TechnicalSerena", "https://t.me/TechnicalSerena"),
+    ("👑 @Xioqui_xin",      "https://t.me/Xioqui_xin"),
 ]
 
 # ── Force Subscribe (optional) ─────────────────────────────────
