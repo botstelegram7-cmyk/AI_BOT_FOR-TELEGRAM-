@@ -696,34 +696,52 @@ async def cb_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
 
     if action == "close":
-        await query.edit_message_text("🎮 Games menu closed.")
+        await query.edit_message_text("🎮 Games menu closed. /games se dobara!")
         return
+
+    state     = get_state(uid)
+    prof      = db.get_profile(uid)
+    uname     = prof.get("name") or query.from_user.first_name
+    char      = get_character(state.get("character")) if state.get("character") else None
+    char_name = char["name"] if char else "Aria"
+    char_mood = db.get_char_mood(state.get("character") or "aria")
 
     if action == "start":
         game = parts[2]
-        state = get_state(uid)
-        state.update({"mode": "game", "game": game, "history": []})
 
         if game == "tod":
-            text, kb = gm.tod_start()
-            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            state.update({"mode": "game", "game": "tod", "history": []})
+            # Inject AI system prompt — AI will generate all questions itself
+            sys_p = gm.truth_or_dare_system(char_name, uname, char_mood)
+            state["history"] = [{"role": "system", "content": sys_p}]
+            await query.edit_message_text(
+                f"🎮 *Truth or Dare with {char_name}!*\n\n"
+                f"_{char_name}: Okay {uname}! Main ready hoon 😏_\n\n"
+                f"Kya chahiye tumhe?",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=gm.tod_keyboard(),
+            )
 
         elif game == "20q":
-            text = gm.twenty_q_start()
-            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
-            state["history"].append({"role": "system", "content": gm.twenty_q_system_prompt()})
+            state.update({"mode": "game", "game": "20q", "history": []})
+            sys_p = gm.twenty_questions_system(char_name, uname)
+            state["history"] = [{"role": "system", "content": sys_p}]
+            # AI asks the first question
+            msgs = state["history"] + [{"role": "user", "content": "Start the game! I'm thinking of something."}]
+            await query.edit_message_text(f"🧩 *20 Questions!*\n\n_{char_name}: Ooh! Main guess karunga/karungi..._ \n\n_Sochna shuru karo..._ 🤔")
+            await _stream_game_reply(query, state, msgs)
 
         elif game == "story":
-            prof  = db.get_profile(uid)
-            uname = prof.get("name") or query.from_user.first_name
-            # Use active character if in character mode, else default
-            char  = get_character(state.get("character")) if state.get("character") else None
-            char_name = char["name"] if char else "Luna"
-            text  = gm.story_start(uname)
-            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
-            state["history"].append({"role": "system", "content": gm.story_system_prompt(char_name)})
+            # Show genre picker first
+            state.update({"mode": "game", "game": "story_pick"})
+            await query.edit_message_text(
+                "📖 *Story Mode!*\n\nKaunsa genre choose karte ho?",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=gm.story_genre_keyboard(),
+            )
 
         elif game == "horo":
+            state.update({"mode": "game", "game": "horo"})
             await query.edit_message_text(
                 "🔮 *Daily Horoscope*\n\nApna zodiac sign chunein:",
                 parse_mode=ParseMode.MARKDOWN,
@@ -731,39 +749,129 @@ async def cb_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
 
         elif game == "spin":
-            result = gm.spin_wheel()
-            state.update({"mode": "ai", "game": None})
-            await query.edit_message_text(result, parse_mode=ParseMode.MARKDOWN)
+            state.update({"mode": "game", "game": "spin", "history": []})
+            sys_p = gm.spin_system(char_name, uname, prof)
+            state["history"] = [{"role": "system", "content": sys_p}]
+            msgs = state["history"] + [{"role": "user", "content": "Spin the wheel! Give me my activity!"}]
+            await query.edit_message_text(f"🎰 *Wheel Spin!*\n\n_{char_name}: Okay spinning..._ 🎡")
+            await _stream_game_reply(query, state, msgs)
 
-        # Award gamer badge
+        elif game == "riddle":
+            state.update({"mode": "game", "game": "riddle", "history": []})
+            sys_p = gm.riddle_system(char_name)
+            state["history"] = [{"role": "system", "content": sys_p}]
+            msgs = state["history"] + [{"role": "user", "content": "Start! Give me a riddle."}]
+            await query.edit_message_text(f"🧠 *Riddle Time with {char_name}!*\n\n_Socho carefully..._ 🤔")
+            await _stream_game_reply(query, state, msgs)
+
+        elif game == "word":
+            state.update({"mode": "game", "game": "word_pick"})
+            await query.edit_message_text(
+                "🔤 *Word Games!*\n\nKaunsa game khelna hai?",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=gm.word_game_keyboard(),
+            )
+
+        # Award badge
         await db.award_badge(uid, "gamer")
+        return
 
-    elif action == "tod":
+    # ── Story genre selected ─────────────────────────────────
+    if action == "story":
+        genre = parts[2]
+        state.update({"mode": "game", "game": "story", "history": []})
+        sys_p = gm.story_mode_system(char_name, uname, genre)
+        state["history"] = [{"role": "system", "content": sys_p}]
+        # AI writes the opening
+        msgs = state["history"] + [{"role": "user", "content": f"Start our {genre} story! Write the opening scene."}]
+        await query.edit_message_text(f"📖 *{genre.capitalize()} Story begins...*\n\n_{char_name} picks up the pen..._ ✍️")
+        await _stream_game_reply(query, state, msgs)
+        await db.award_badge(uid, "story_teller")
+        return
+
+    # ── Word game type selected ──────────────────────────────
+    if action == "word":
+        game_type = parts[2]
+        state.update({"mode": "game", "game": f"word_{game_type}", "history": []})
+        sys_p = gm.word_game_system(char_name, game_type)
+        state["history"] = [{"role": "system", "content": sys_p}]
+        game_names = {"antakshari": "Antakshari 🎵", "wordchain": "Word Chain 🔗"}
+        name_display = game_names.get(game_type, game_type)
+        msgs = state["history"] + [{"role": "user", "content": "Let's start! You go first."}]
+        await query.edit_message_text(f"🔤 *{name_display} with {char_name}!*\n\n_{char_name}: Chalte hain!_ 🎯")
+        await _stream_game_reply(query, state, msgs)
+        return
+
+    # ── Truth or Dare button presses ─────────────────────────
+    if action == "tod":
         choice = parts[2]
         if choice == "end":
-            get_state(uid).update({"mode": "ai", "game": None})
+            state.update({"mode": "ai", "game": None, "history": []})
             await query.edit_message_text("🎮 Truth or Dare khatam! /games se dobara khelo.")
             return
-        text, kb = gm.tod_play(choice)
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        # User chose Truth/Dare/Random — AI generates the question
+        choice_map = {"truth": "Give me a Truth question now.", "dare": "Give me a Dare challenge now.", "random": "Give me either Truth or Dare — your choice, surprise me!"}
+        user_msg = choice_map.get(choice, "Give me a question.")
+        state["history"].append({"role": "user", "content": user_msg})
+        msgs = state["history"]
+        await query.edit_message_text(f"_{char_name} is thinking..._ 💭")
+        await _stream_game_reply(query, state, msgs, keyboard=gm.tod_keyboard())
+        return
 
-    elif action == "horo":
+    # ── Horoscope sign selected ──────────────────────────────
+    if action == "horo":
         sign  = parts[2]
-        state = get_state(uid)
-        char  = get_character(state.get("character")) if state.get("character") else None
-        char_name = char["name"] if char else "Aria"
-        sys_p = gm.horoscope_system_prompt(char_name, sign)
-        msgs  = [{"role": "system", "content": sys_p},
-                 {"role": "user", "content": f"Give me my {sign} horoscope for today."}]
-        await query.edit_message_text(f"🔮 Reading your {sign} horoscope...")
+        sys_p = gm.horoscope_system(char_name, sign, uname)
+        msgs  = [
+            {"role": "system", "content": sys_p},
+            {"role": "user",   "content": f"Give me my complete {sign} horoscope for today!"},
+        ]
+        await query.edit_message_text(f"🔮 *{sign} Horoscope*\n\n_{char_name}: Taaron se pooch rahi/raha hoon..._ ✨")
+        full = ""
         try:
-            full = ""
             async for chunk in stream_ai_response(state["provider"], state["model"], msgs):
                 full += chunk
-            state.update({"mode": "ai", "game": None})
-            await query.edit_message_text(f"🔮 *{sign} Horoscope*\n\n{full}", parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
-            await query.edit_message_text(f"❌ Error: {e}")
+            await query.edit_message_text(f"❌ {e}")
+            return
+        state.update({"mode": "ai", "game": None})
+        try:
+            await query.edit_message_text(f"🔮 *{sign} — Aaj ka Horoscope*\n\n{full}", parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            await query.message.reply_text(f"🔮 *{sign} — Aaj ka Horoscope*\n\n{full}", parse_mode=ParseMode.MARKDOWN)
+
+
+async def _stream_game_reply(query, state: dict, msgs: list, keyboard=None):
+    """Stream AI reply for a game, edit the placeholder message."""
+    import time
+    full_text = ""
+    last_edit = time.monotonic()
+    try:
+        async for chunk in stream_ai_response(state["provider"], state["model"], msgs):
+            full_text += chunk
+            now = time.monotonic()
+            if now - last_edit >= 1.0 and full_text.strip():
+                try:
+                    await query.edit_message_text(full_text.rstrip() + " ▌", parse_mode=ParseMode.MARKDOWN)
+                    last_edit = now
+                except Exception:
+                    pass
+        # Final message
+        if full_text.strip():
+            state["history"].append({"role": "assistant", "content": full_text})
+            try:
+                if keyboard:
+                    await query.edit_message_text(full_text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+                else:
+                    await query.edit_message_text(full_text, parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error("Game stream error: %s", e)
+        try:
+            await query.edit_message_text(f"❌ Error: {e}\n\nDusra model try karo → /model")
+        except Exception:
+            pass
 
 
 # ════════════════════════════════════════════════════════════
