@@ -33,6 +33,7 @@ from telegram.ext import (
 
 import config
 import database as db
+from love_mode_prompt import get_love_mode_prompt, is_love_mode_on, is_love_mode_off, LOVE_MODE_OFF_RESPONSE
 from ai_client import (
     AVAILABLE_MODELS, get_active_providers,
     get_model_label, stream_ai_response,
@@ -60,6 +61,8 @@ def get_state(uid: int) -> dict:
             "mode":       "ai",
             "character":  None,
             "browse_idx": 0,
+            "love_mode":  False,
+            "user_gender": "unknown",
         }
     return user_states[uid]
 
@@ -1039,8 +1042,49 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text.strip()
     await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
+    # ── Love Mode toggle ──────────────────────────────────
+    if is_love_mode_on(user_text):
+        state["love_mode"] = True
+        state["history"]   = []
+        lm_text = (
+            "love mode...\n\n"
+            f"hey {user.first_name} :)\n\n"
+            "I'm here now.\n\n"
+            "_Bata do: girlfriend chahiye ya boyfriend? So I know how to be here for you._"
+        )
+        await update.message.reply_text(lm_text, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if is_love_mode_off(user_text):
+        state["love_mode"] = False
+        state["history"]   = []
+        await update.message.reply_text(LOVE_MODE_OFF_RESPONSE)
+        return
+
+    # Gender detection from user message
+    if state.get("love_mode") and state.get("user_gender") == "unknown":
+        t = user_text.lower()
+        if any(w in t for w in ["girlfriend", "girl", "female", "ladki", "ladkiya", "she/her"]):
+            state["user_gender"] = "female"
+        elif any(w in t for w in ["boyfriend", "boy", "male", "ladka", "he/him"]):
+            state["user_gender"] = "male"
+
     # Build system prompt
-    if state["mode"] == "character":
+    if state.get("love_mode"):
+        char       = get_character(state["character"]) if state.get("character") else None
+        char_name  = char["name"] if char else "Aria"
+        prof       = db.get_profile(user.id)
+        uname      = prof.get("name") or user.first_name
+        rel_pts    = db.get_relationship(user.id, state.get("character") or "aria")
+        mood       = db.get_char_mood(state.get("character") or "aria")
+        sys_prompt = get_love_mode_prompt(
+            char_name       = char_name,
+            user_name       = uname,
+            user_gender     = state.get("user_gender", "unknown"),
+            char_mood       = mood,
+            relationship_level = rel_pts,
+        )
+    elif state["mode"] == "character":
         char       = get_character(state["character"])
         sys_prompt = char["prompt"] if char else current_system_prompt
         prof = db.get_profile(user.id)
