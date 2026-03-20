@@ -957,43 +957,51 @@ _scheduler    = None
 def _register_schedule(sched: dict, bot):
     if _scheduler is None:
         return
-    async def _send():
+    async def _send(s=sched, b=bot):
         targets = set(db.get_allowed_users().keys()) | config.OWNER_IDS
-        for uid in targets:
+        for target_uid in targets:
             try:
-                await bot.send_message(uid, f"⏰ {sched['message']}", parse_mode=ParseMode.MARKDOWN)
+                await b.send_message(target_uid, f"⏰ {s['message']}", parse_mode=ParseMode.MARKDOWN)
             except Exception:
                 pass
     try:
         hh, mm = sched["time"].split(":")
+        loop = asyncio.get_event_loop()
+        def _sync_send(s=sched, b=bot, l=loop):
+            asyncio.ensure_future(_send(s, b), loop=l)
         _scheduler.add_job(
-            lambda s=sched, b=bot: asyncio.create_task(_send()),
+            _sync_send,
             trigger="cron", hour=int(hh), minute=int(mm),
             id=sched["id"], replace_existing=True,
         )
     except Exception as e:
         logger.warning("Schedule register failed: %s", e)
 
-def start_scheduler(bot):
+async def start_scheduler(bot):
+    """Called from within running asyncio event loop (lifespan)."""
     global _scheduler
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
-        _scheduler = AsyncIOScheduler()
+        loop = asyncio.get_event_loop()
+        _scheduler = AsyncIOScheduler(event_loop=loop)
 
-        # AI Greeting schedules
-        for hour, slot in [(7, "morning"), (13, "noon"), (21, "night")]:
-            _scheduler.add_job(
-                lambda b=bot, s=slot: asyncio.create_task(send_ai_greeting(b, s)),
-                trigger="cron", hour=hour, minute=0,
-                id=f"greeting_{slot}", replace_existing=True,
-            )
+        def _make_job(slot):
+            def job():
+                asyncio.ensure_future(send_ai_greeting(bot, slot), loop=loop)
+            return job
 
-        # User-defined schedules
+        _scheduler.add_job(_make_job("morning"), trigger="cron", hour=7,  minute=0,
+                           id="greeting_morning", replace_existing=True)
+        _scheduler.add_job(_make_job("noon"),    trigger="cron", hour=13, minute=0,
+                           id="greeting_noon",    replace_existing=True)
+        _scheduler.add_job(_make_job("night"),   trigger="cron", hour=21, minute=0,
+                           id="greeting_night",   replace_existing=True)
+
         for sched in db.get_schedules():
             _register_schedule(sched, bot)
 
         _scheduler.start()
-        logger.info("✅ Scheduler started (greetings: 7am, 1pm, 9pm)")
+        logger.info("✅ Scheduler started (greetings: 7am, 1pm, 9pm UTC)")
     except Exception as e:
         logger.warning("Scheduler failed: %s", e)
 
@@ -1159,7 +1167,7 @@ async def lifespan(app: FastAPI):
             allowed_updates=Update.ALL_TYPES,
         )
     await _ptb_app.start()
-    start_scheduler(_ptb_app.bot)
+    await start_scheduler(_ptb_app.bot)
     yield
     await _ptb_app.stop()
     await _ptb_app.shutdown()
@@ -1919,6 +1927,7 @@ h1{{background:linear-gradient(135deg,#7c4dff,#ff4081);-webkit-background-clip:t
 
 
 @web_app.get("/")
+@web_app.head("/")
 async def health():
     return {"ok": True, "status": "AI Bot running 🤖"}
 
