@@ -1141,6 +1141,34 @@ async def cmd_miniapp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 #  FASTAPI + MINI APP HTML (embedded)
 # ════════════════════════════════════════════════════════════
 
+
+# ════════════════════════════════════════════════════════════
+#  FASTAPI LIFESPAN
+# ════════════════════════════════════════════════════════════
+_ptb_app: Application = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _ptb_app
+    _ptb_app = build_ptb_app()
+    await _ptb_app.initialize()
+    await db.init_db()
+    if config.WEBHOOK_URL:
+        await _ptb_app.bot.set_webhook(
+            f"{config.WEBHOOK_URL}/webhook",
+            allowed_updates=Update.ALL_TYPES,
+        )
+    await _ptb_app.start()
+    start_scheduler(_ptb_app.bot)
+    yield
+    await _ptb_app.stop()
+    await _ptb_app.shutdown()
+    if _scheduler:
+        _scheduler.shutdown()
+
+web_app = FastAPI(lifespan=lifespan)
+web_app.router.lifespan_context = lifespan
+
 _MINI_APP_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1905,33 +1933,6 @@ async def telegram_webhook(request: Request):
         logger.error("Webhook error: %s", e)
     return Response(status_code=200)
 
-
-# ════════════════════════════════════════════════════════════
-#  FASTAPI LIFESPAN
-# ════════════════════════════════════════════════════════════
-_ptb_app: Application = None
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _ptb_app
-    _ptb_app = build_ptb_app()
-    await _ptb_app.initialize()
-    await db.init_db()
-    if config.WEBHOOK_URL:
-        await _ptb_app.bot.set_webhook(
-            f"{config.WEBHOOK_URL}/webhook",
-            allowed_updates=Update.ALL_TYPES,
-        )
-    await _ptb_app.start()
-    start_scheduler(_ptb_app.bot)
-    yield
-    await _ptb_app.stop()
-    await _ptb_app.shutdown()
-    if _scheduler:
-        _scheduler.shutdown()
-
-web_app = FastAPI(lifespan=lifespan)
-web_app.router.lifespan_context = lifespan
 
 
 async def _polling_mode():
