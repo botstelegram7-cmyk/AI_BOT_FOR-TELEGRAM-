@@ -1,22 +1,24 @@
-# Telegram (webhooks extra required for Render)
+# Telegram
 python-telegram-bot[webhooks]==21.6
 
-# OpenAI-compatible (OpenAI, Grok, Groq, SambaNova, OpenRouter, NVIDIA)
+# Web server (FastAPI + uvicorn for dashboard + webhook)
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# AI SDKs
 openai>=1.40.0
-
-# Anthropic / Claude
 anthropic>=0.34.0
-
-# Google Gemini (new SDK)
 google-genai>=1.0.0
-
-# Groq official SDK (streaming)
 groq>=0.9.0
 
-# MongoDB async driver
+# MongoDB
 motor>=3.3.0
 pymongo>=4.6.0
 
-# HTTP (OpenRouter / NVIDIA fallback)
+# Scheduler
+APScheduler>=3.10.0
+
+# HTTP
 requests>=2.31.0
 aiohttp>=3.9.0
+httpx>=0.27.0

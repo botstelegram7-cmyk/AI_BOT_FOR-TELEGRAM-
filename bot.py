@@ -1,41 +1,45 @@
 """
-Telegram AI Bot — v4 Final
-• 8 AI Providers: OpenAI, Anthropic, Grok, Gemini, Groq, SambaNova, OpenRouter, NVIDIA
-• Tinder-style character selector with relationship levels
-• /menu — beautiful inline keyboard hub
-• /profile — user profile system
-• /stats  — owner analytics panel
-• MongoDB persistence (optional)
-• Owner access control, daily limits, /setprompt, /broadcast
-• Render: RENDER_EXTERNAL_URL auto-detected → webhook | Local: polling
+Telegram AI Bot — Mega Edition
+• 8 AI Providers with ChatGPT-like streaming
+• Tinder character browser + mood + relationship + gifts
+• Games: Truth/Dare, 20Q, Story, Horoscope, Spin
+• Leaderboard + Badges
+• User activity log, /finduser, auto-ban spam
+• Scheduled broadcasts
+• Mini Web Dashboard (FastAPI)
+• Owner panel: stats, users, prompts, schedules
 """
 
+import asyncio
+import json
 import logging
-from datetime import date
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import date, datetime, timezone
 
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputMediaPhoto,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes,
+    Bot, InlineKeyboardButton, InlineKeyboardMarkup,
+    InputMediaPhoto, Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
+from telegram.ext import (
+    Application, CallbackQueryHandler, CommandHandler,
+    ContextTypes, MessageHandler, filters,
+)
 
 import config
 import database as db
-from ai_client import AVAILABLE_MODELS, get_ai_response, get_active_providers, get_model_label
-from characters import CHARACTERS, get_character, get_char_pic, build_card_text
+import games as gm
+from ai_client import (
+    AVAILABLE_MODELS, get_active_providers,
+    get_model_label, stream_ai_response,
+)
+from characters import CHARACTERS, build_card_text, get_char_pic, get_character
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -46,7 +50,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SYSTEM_PROMPT = "You are a helpful, friendly, and concise AI assistant."
 current_system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
-# ─── per-user AI state (in-memory, fast) ────────────────────────
+# Per-user AI state
 user_states: dict = {}
 
 def get_state(uid: int) -> dict:
@@ -55,16 +59,17 @@ def get_state(uid: int) -> dict:
             "provider":   config.DEFAULT_PROVIDER,
             "model":      config.DEFAULT_MODEL,
             "history":    [],
-            "mode":       "ai",        # "ai" | "character"
+            "mode":       "ai",        # "ai" | "character" | "game"
             "character":  None,
+            "game":       None,        # active game type
             "browse_idx": 0,
         }
     return user_states[uid]
 
 
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 #  ACCESS HELPERS
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 def is_owner(uid: int, username: str = None) -> bool:
     if uid in config.OWNER_IDS:
         return True
@@ -106,9 +111,57 @@ def owner_only(func):
     return wrapper
 
 
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
+#  STREAMING SEND — ChatGPT-like typing effect
+# ════════════════════════════════════════════════════════════
+async def send_streaming(update: Update, provider: str, model: str, messages: list) -> str:
+    placeholder = await update.message.reply_text("💭 _Thinking..._", parse_mode=ParseMode.MARKDOWN)
+    full_text   = ""
+    last_edit   = time.monotonic()
+    INTERVAL    = 0.9  # edit at most every 0.9s (Telegram rate limit safe)
+
+    try:
+        async for chunk in stream_ai_response(provider, model, messages):
+            full_text += chunk
+            now = time.monotonic()
+            if now - last_edit >= INTERVAL and full_text.strip():
+                try:
+                    await placeholder.edit_text(full_text.rstrip() + " ▌")
+                    last_edit = now
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after)
+                except Exception:
+                    pass
+
+        # Final — remove cursor, handle long responses
+        if not full_text.strip():
+            await placeholder.edit_text("❌ Empty response. Dusra model try karo → /model")
+            return ""
+
+        if len(full_text) > 4000:
+            await placeholder.delete()
+            for i in range(0, len(full_text), 4000):
+                await update.message.reply_text(full_text[i:i + 4000])
+        else:
+            await placeholder.edit_text(full_text)
+
+    except Exception as exc:
+        logger.error("Streaming error [%s/%s]: %s", provider, model, exc)
+        try:
+            await placeholder.edit_text(
+                f"❌ *Error:*\n`{exc}`\n\nDusra model try karein → /model",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
+        raise
+
+    return full_text
+
+
+# ════════════════════════════════════════════════════════════
 #  /start
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user    = update.effective_user
     ok, msg = can_use_bot(user.id)
@@ -116,50 +169,57 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
+    db.update_activity(user.id, getattr(user, "username", "") or "", user.first_name)
     crown   = " 👑" if is_owner(user.id) else ""
     active  = get_active_providers()
-    plist   = " · ".join(AVAILABLE_MODELS[p]["name"] for p in active) or "⚠️ Koi API key set nahi"
+    plist   = " · ".join(AVAILABLE_MODELS[p]["name"] for p in active) or "⚠️ Koi key set nahi"
 
     caption = (
-        f"🤖 *AI Bot mein Swagat Hai!*{crown}\n\n"
-        f"*Active Providers:*\n{plist}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💞 /meet — AI Companions se milo\n"
-        f"📋 /menu — Main Menu\n"
-        f"🔌 /model — AI Model chunein\n"
-        f"📊 /status — Status dekho\n"
-        f"👤 /profile — Apna profile set karo\n"
-        f"🆘 /help — Help\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"_Koi bhi message bhejein — AI ready hai!_ 💬"
+        f"🤖 *AI Bot mein Swagat!*{crown}\n\n"
+        f"*Providers:* {plist}\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📋 /menu  —  Main hub\n"
+        f"💞 /meet  —  AI Companions\n"
+        f"🎮 /games —  Fun games\n"
+        f"🔌 /model —  AI model\n"
+        f"👤 /profile — Tera profile\n"
+        f"🏆 /top   —  Leaderboard\n"
+        f"🆘 /help  —  Help\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"_Koi bhi message bhejo!_ 💬"
     )
 
-    # Single message: media + caption together
-    try:
-        if config.WELCOME_VIDEO:
-            await update.message.reply_video(
-                video=config.WELCOME_VIDEO,
-                caption=caption,
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-        if config.WELCOME_PIC:
-            await update.message.reply_photo(
-                photo=config.WELCOME_PIC,
-                caption=caption,
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-    except Exception as e:
-        logger.warning("Media send failed: %s", e)
+    sent = False
+    if config.WELCOME_VIDEO:
+        try:
+            await update.message.reply_video(video=config.WELCOME_VIDEO,
+                                              caption=caption, parse_mode=ParseMode.MARKDOWN)
+            sent = True
+        except Exception as e:
+            logger.warning("Welcome video failed: %s", e)
+    if not sent and config.WELCOME_PIC:
+        try:
+            await update.message.reply_photo(photo=config.WELCOME_PIC,
+                                             caption=caption, parse_mode=ParseMode.MARKDOWN)
+            sent = True
+        except Exception as e:
+            logger.warning("Welcome pic failed: %s", e)
+    if not sent:
+        await update.message.reply_text(caption, parse_mode=ParseMode.MARKDOWN)
 
-    # Fallback: text only
-    await update.message.reply_text(caption, parse_mode=ParseMode.MARKDOWN)
+    # Award first_chat badge
+    new_b = await db.check_and_award_badges(user.id)
+    for bk in new_b:
+        b = db.BADGE_DEFINITIONS.get(bk, ("🏅", bk, ""))
+        await update.message.reply_text(
+            f"🎉 *New Badge Unlocked!*\n\n{b[0]} *{b[1]}*\n_{b[2]}_",
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
 
-# ═══════════════════════════════════════════════════════
-#  /menu  — Beautiful inline hub
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
+#  /menu
+# ════════════════════════════════════════════════════════════
 async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user    = update.effective_user
     ok, msg = can_use_bot(user.id)
@@ -168,33 +228,29 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     state = get_state(user.id)
-    mode  = state["mode"]
-
-    if mode == "character":
+    if state["mode"] == "character":
         char = get_character(state["character"])
-        mode_line = f"💞 Chatting with *{char['name']}*" if char else "💞 Character mode"
+        mode_line = f"💞 Chatting with *{char['name']}* — /leave"
+    elif state["mode"] == "game":
+        mode_line = f"🎮 In a game — /endgame"
     else:
-        lbl       = get_model_label(state["provider"], state["model"])
-        mode_line = f"🤖 AI mode — `{lbl}`"
+        lbl = get_model_label(state["provider"], state["model"])
+        mode_line = f"🤖 AI Mode — `{lbl}`"
 
     kb = [
-        [
-            InlineKeyboardButton("💞 Meet Characters", callback_data="menu:meet"),
-            InlineKeyboardButton("🔌 Change Model",    callback_data="menu:model"),
-        ],
-        [
-            InlineKeyboardButton("👤 My Profile",    callback_data="menu:profile"),
-            InlineKeyboardButton("📊 My Status",     callback_data="menu:status"),
-        ],
-        [
-            InlineKeyboardButton("🧹 Clear History", callback_data="menu:clear"),
-            InlineKeyboardButton("👋 Leave Chat",    callback_data="menu:leave"),
-        ],
+        [InlineKeyboardButton("💞 Meet Characters", callback_data="menu:meet"),
+         InlineKeyboardButton("🎮 Games",           callback_data="menu:games")],
+        [InlineKeyboardButton("🔌 Change Model",    callback_data="menu:model"),
+         InlineKeyboardButton("👤 Profile",         callback_data="menu:profile")],
+        [InlineKeyboardButton("🏆 Leaderboard",     callback_data="menu:top"),
+         InlineKeyboardButton("🎖️ My Badges",       callback_data="menu:badges")],
+        [InlineKeyboardButton("📊 Status",          callback_data="menu:status"),
+         InlineKeyboardButton("🧹 Clear History",   callback_data="menu:clear")],
     ]
     if is_owner(user.id):
         kb.append([
-            InlineKeyboardButton("📈 Bot Stats",      callback_data="menu:stats"),
-            InlineKeyboardButton("👥 Manage Users",   callback_data="menu:users"),
+            InlineKeyboardButton("📈 Stats",        callback_data="menu:stats"),
+            InlineKeyboardButton("🌐 Dashboard",    url=f"{config.WEBHOOK_URL}/dashboard" if config.WEBHOOK_URL else "https://t.me"),
         ])
 
     await update.message.reply_text(
@@ -205,229 +261,210 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cb_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
+    query  = update.callback_query
     await query.answer()
-    uid     = query.from_user.id
-    action  = query.data.split(":", 1)[1]
+    uid    = query.from_user.id
+    action = query.data.split(":", 1)[1]
 
     if action == "meet":
-        await query.edit_message_text("💞 Opening character browser...", parse_mode=ParseMode.MARKDOWN)
-        await _send_card_new(query.message, uid, 0)
+        await query.edit_message_text("💞 Loading companions...", parse_mode=ParseMode.MARKDOWN)
+        await _send_card(query.message, uid, 0)
+    elif action == "games":
+        await query.edit_message_text(
+            "🎮 *Games Menu* — Kaunsa game khelna hai?",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=gm.games_menu_keyboard(),
+        )
     elif action == "model":
-        await query.edit_message_text("🔌 *Model Picker*\n\nProvider chunein:", parse_mode=ParseMode.MARKDOWN,
-                                      reply_markup=_provider_keyboard())
+        await query.edit_message_text(
+            "🔌 *Provider chunein:*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_provider_keyboard(),
+        )
     elif action == "profile":
-        await _show_profile_menu(query.message, uid, edit=False)
+        await _show_profile(query.message, uid, edit=True)
+    elif action == "top":
+        await query.edit_message_text(_leaderboard_text(), parse_mode=ParseMode.MARKDOWN)
+    elif action == "badges":
+        await query.edit_message_text(_badges_text(uid), parse_mode=ParseMode.MARKDOWN)
     elif action == "status":
         await query.edit_message_text(_status_text(uid), parse_mode=ParseMode.MARKDOWN)
     elif action == "clear":
         get_state(uid)["history"] = []
-        await query.edit_message_text("🧹 History clear!", parse_mode=ParseMode.MARKDOWN)
-    elif action == "leave":
-        state = get_state(uid)
-        if state["mode"] == "character":
-            char  = get_character(state["character"])
-            name  = char["name"] if char else "Character"
-            state.update({"mode": "ai", "character": None, "history": []})
-            await query.edit_message_text(f"👋 *{name}* se bye-bye!\n\nAb AI mode mein ho.",
-                                          parse_mode=ParseMode.MARKDOWN)
-        else:
-            await query.edit_message_text("ℹ️ Abhi character mode mein nahi ho.", parse_mode=ParseMode.MARKDOWN)
-    elif action == "stats":
-        if is_owner(uid):
-            await query.edit_message_text(_stats_text(), parse_mode=ParseMode.MARKDOWN)
-    elif action == "users":
-        if is_owner(uid):
-            await query.edit_message_text(_users_text(), parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("🧹 History clear!")
+    elif action == "stats" and is_owner(uid):
+        await query.edit_message_text(_stats_text(), parse_mode=ParseMode.MARKDOWN)
 
 
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 #  /help
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user    = update.effective_user
     ok, msg = can_use_bot(user.id)
     if not ok:
         await update.message.reply_text(msg)
         return
-
     base = (
-        "🆘 *Help Menu*\n\n"
-        "📋 /menu     — Main menu (sab kuch yahan)\n"
-        "🤖 /start    — Welcome message\n"
-        "💞 /meet     — AI Companions browser\n"
-        "👋 /leave    — Character chat se bahar\n"
-        "🔌 /model    — AI Model change karo\n"
+        "🆘 *Help*\n\n"
+        "📋 /menu     — Main hub\n"
+        "🤖 /start    — Welcome\n"
+        "💞 /meet     — AI Companions\n"
+        "🎮 /games    — Games menu\n"
+        "👋 /leave    — Leave character/game\n"
+        "🔌 /model    — Change AI model\n"
         "📊 /status   — Current status\n"
-        "👤 /profile  — Apna profile\n"
-        "🧹 /clear    — Chat history saaf karo\n"
+        "👤 /profile  — Your profile\n"
+        "🏆 /top      — Leaderboard\n"
+        "🎖️ /badges   — Your badges\n"
+        "🧹 /clear    — Clear history\n"
     )
-    owner_section = (
-        "\n👑 *Owner Commands:*\n"
-        "/adduser `<id> [limit]` — Allow user\n"
-        "/removeuser `<id>` — Remove user\n"
-        "/ban · /unban `<id>` — Ban control\n"
-        "/setlimit `<id> <N>` — Daily limit\n"
-        "/users — Users list\n"
-        "/stats — Bot analytics\n"
-        "/broadcast `<msg>` — Sabko message\n"
-        "/setprompt · /viewprompt · /resetprompt\n"
+    owner_sec = (
+        "\n👑 *Owner:*\n"
+        "/adduser /removeuser /ban /unban /setlimit\n"
+        "/users /stats /broadcast /finduser\n"
+        "/schedule /unschedule /schedules\n"
+        "/setprompt /viewprompt /resetprompt\n"
     ) if is_owner(user.id) else ""
+    await update.message.reply_text(base + owner_sec, parse_mode=ParseMode.MARKDOWN)
 
-    await update.message.reply_text(base + owner_section, parse_mode=ParseMode.MARKDOWN)
 
-
-# ═══════════════════════════════════════════════════════
-#  STATUS HELPER
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
+#  STATUS / LEADERBOARD / BADGES
+# ════════════════════════════════════════════════════════════
 def _status_text(uid: int) -> str:
     state = get_state(uid)
     used  = db.get_usage_today(uid)
     total = db.get_total_messages(uid)
+    bdgs  = db.get_badges(uid)
 
     if state["mode"] == "character":
-        char    = get_character(state["character"])
-        cname   = char["name"] if char else "Unknown"
-        pts     = db.get_relationship(uid, state["character"])
-        label   = db.get_relationship_label(pts)
-        mode_str = f"💞 Character: *{cname}*\nRelationship: {label} ({pts} pts)"
+        char  = get_character(state["character"])
+        cname = char["name"] if char else "?"
+        pts   = db.get_relationship(uid, state["character"])
+        rlbl  = db.get_relationship_label(pts)
+        mood  = db.get_char_mood(state["character"])
+        mode_line = f"💞 *{cname}* | {rlbl} | Mood: {mood}"
     else:
-        lbl      = get_model_label(state["provider"], state["model"])
-        pname    = AVAILABLE_MODELS.get(state["provider"], {}).get("name", state["provider"])
-        mode_str = f"🤖 AI Mode\nProvider: {pname}\nModel: `{lbl}`"
+        lbl  = get_model_label(state["provider"], state["model"])
+        pname = AVAILABLE_MODELS.get(state["provider"], {}).get("name", state["provider"])
+        mode_line = f"🤖 {pname} — `{lbl}`"
 
-    if is_owner(uid):
-        limit_str = "Unlimited 👑"
-    else:
-        lim = db.get_allowed_users().get(uid, {}).get("limit")
-        limit_str = f"{used}/{lim}" if lim else f"{used}/Unlimited"
+    lim = db.get_allowed_users().get(uid, {}).get("limit") if not is_owner(uid) else None
+    limit_str = f"{used}/{lim}" if lim else ("Unlimited 👑" if is_owner(uid) else f"{used}/∞")
 
     return (
-        f"📊 *Your Status*\n\n"
-        f"{mode_str}\n\n"
-        f"Today: {limit_str} messages\n"
-        f"Total: {total} messages\n"
+        f"📊 *Status*\n\n"
+        f"{mode_line}\n\n"
+        f"Today  : {limit_str} msgs\n"
+        f"Total  : {total} msgs\n"
+        f"Badges : {len(bdgs)} 🎖️\n"
         f"History: {len(state['history'])} msgs"
     )
 
-
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    ok, msg = can_use_bot(user.id)
-    if not ok:
-        await update.message.reply_text(msg)
+    user = update.effective_user
+    if not can_use_bot(user.id)[0]:
+        await update.message.reply_text(can_use_bot(user.id)[1])
         return
     await update.message.reply_text(_status_text(user.id), parse_mode=ParseMode.MARKDOWN)
 
-
 async def cmd_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    ok, msg = can_use_bot(user.id)
-    if not ok:
-        await update.message.reply_text(msg)
+    user = update.effective_user
+    if not can_use_bot(user.id)[0]:
+        await update.message.reply_text(can_use_bot(user.id)[1])
         return
     get_state(user.id)["history"] = []
     await update.message.reply_text("🧹 History clear!")
 
+def _leaderboard_text() -> str:
+    board = db.get_leaderboard(10)
+    if not board:
+        return "📭 Abhi koi data nahi."
+    lines = ["🏆 *Leaderboard — Top Chatters*\n"]
+    medals = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
+    for i, (uid, total) in enumerate(board):
+        prof  = db.get_profile(uid)
+        info  = db.get_allowed_users().get(uid, {})
+        name  = prof.get("name") or info.get("username") or f"User {uid}"
+        today = db.get_usage_today(uid)
+        lines.append(f"{medals[i]} *{name}* — {total} msgs (today: {today})")
+    return "\n".join(lines)
 
-# ═══════════════════════════════════════════════════════
+async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not can_use_bot(user.id)[0]:
+        await update.message.reply_text(can_use_bot(user.id)[1])
+        return
+    await update.message.reply_text(_leaderboard_text(), parse_mode=ParseMode.MARKDOWN)
+
+def _badges_text(uid: int) -> str:
+    owned = db.get_badges(uid)
+    if not owned:
+        return "🎖️ *Badges*\n\nAbhi koi badge nahi! Chatting karo aur unlock karo! 💬"
+    lines = ["🎖️ *Your Badges*\n"]
+    for key, (emoji, name, desc) in db.BADGE_DEFINITIONS.items():
+        if key in owned:
+            lines.append(f"{emoji} *{name}* — _{desc}_")
+    total = len(db.BADGE_DEFINITIONS)
+    lines.append(f"\n_{len(owned)}/{total} unlocked_")
+    return "\n".join(lines)
+
+async def cmd_badges(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not can_use_bot(user.id)[0]:
+        await update.message.reply_text(can_use_bot(user.id)[1])
+        return
+    await update.message.reply_text(_badges_text(user.id), parse_mode=ParseMode.MARKDOWN)
+
+
+# ════════════════════════════════════════════════════════════
 #  /profile
-# ═══════════════════════════════════════════════════════
-async def _show_profile_menu(message, uid: int, edit=False):
+# ════════════════════════════════════════════════════════════
+async def _show_profile(message, uid: int, edit: bool = False):
     prof = db.get_profile(uid)
     text = (
         f"👤 *Your Profile*\n\n"
-        f"Name : {prof.get('name', '—')}\n"
-        f"Age  : {prof.get('age', '—')}\n"
-        f"Bio  : {prof.get('bio', '—')}\n"
-        f"Mood : {prof.get('mood', '—')}\n\n"
-        f"_Use buttons to edit:_"
+        f"Name   : {prof.get('name', '—')}\n"
+        f"Age    : {prof.get('age', '—')}\n"
+        f"Bio    : {prof.get('bio', '—')}\n"
+        f"Mood   : {prof.get('mood', '—')}\n"
+        f"Zodiac : {prof.get('zodiac', '—')}\n"
+        f"Lang   : {prof.get('lang', 'Hinglish')}\n\n"
+        f"_Edit: /profile name Alex_\n"
+        f"_Fields: name, age, bio, mood, zodiac, lang_"
     )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ Set Name",  callback_data="profile:setname"),
-         InlineKeyboardButton("✏️ Set Age",   callback_data="profile:setage")],
-        [InlineKeyboardButton("✏️ Set Bio",   callback_data="profile:setbio"),
-         InlineKeyboardButton("😊 Set Mood",  callback_data="profile:setmood")],
-        [InlineKeyboardButton("❌ Close",     callback_data="profile:close")],
-    ])
     if edit:
         try:
-            await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            await message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+            return
         except Exception:
-            await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-    else:
-        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-
+            pass
+    await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    ok, msg = can_use_bot(user.id)
-    if not ok:
-        await update.message.reply_text(msg)
+    user = update.effective_user
+    if not can_use_bot(user.id)[0]:
+        await update.message.reply_text(can_use_bot(user.id)[1])
         return
-    # If args given: /profile name Alex
     if ctx.args and len(ctx.args) >= 2:
         field = ctx.args[0].lower()
         value = " ".join(ctx.args[1:])
-        prof  = db.get_profile(user.id)
-        if field in ("name", "age", "bio", "mood"):
+        valid = {"name", "age", "bio", "mood", "zodiac", "lang"}
+        if field in valid:
+            prof = db.get_profile(user.id)
             prof[field] = value
             await db.save_profile(user.id, prof)
-            await update.message.reply_text(f"✅ {field.capitalize()} updated: *{value}*",
+            await update.message.reply_text(f"✅ *{field.capitalize()}* set: *{value}*",
                                              parse_mode=ParseMode.MARKDOWN)
             return
-    await _show_profile_menu(update.message, user.id)
+    await _show_profile(update.message, user.id)
 
 
-async def cb_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query  = update.callback_query
-    await query.answer()
-    uid    = query.from_user.id
-    action = query.data.split(":", 1)[1]
-
-    if action == "close":
-        await query.edit_message_text("👤 Profile menu closed.")
-        return
-
-    field_map = {
-        "setname": ("name", "apna naam"),
-        "setage":  ("age",  "apni age"),
-        "setbio":  ("bio",  "apni bio"),
-        "setmood": ("mood", "apna mood (e.g. Happy 😊, Sad 😢)"),
-    }
-    if action in field_map:
-        field, prompt_text = field_map[action]
-        ctx.user_data["profile_edit_field"] = field
-        ctx.user_data["profile_edit_uid"]   = uid
-        await query.edit_message_text(
-            f"✏️ *{field.capitalize()} set karo*\n\n{prompt_text} likhein:",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
-
-async def handle_profile_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Returns True if we handled a profile edit, False otherwise."""
-    field = ctx.user_data.get("profile_edit_field")
-    if not field:
-        return False
-    uid   = update.effective_user.id
-    value = update.message.text.strip()
-    prof  = db.get_profile(uid)
-    prof[field] = value
-    await db.save_profile(uid, prof)
-    ctx.user_data.pop("profile_edit_field", None)
-    ctx.user_data.pop("profile_edit_uid", None)
-    await update.message.reply_text(
-        f"✅ *{field.capitalize()}* set ho gaya: *{value}*\n\n/profile se dekho!",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    return True
-
-
-# ═══════════════════════════════════════════════════════
-#  TINDER-STYLE CHARACTER BROWSER
-# ═══════════════════════════════════════════════════════
-def _browse_keyboard(idx: int, char_id: str) -> InlineKeyboardMarkup:
+# ════════════════════════════════════════════════════════════
+#  TINDER CHARACTER BROWSER
+# ════════════════════════════════════════════════════════════
+def _browse_kb(idx: int, char_id: str) -> InlineKeyboardMarkup:
     total = len(CHARACTERS)
     nav   = []
     if idx > 0:
@@ -436,35 +473,34 @@ def _browse_keyboard(idx: int, char_id: str) -> InlineKeyboardMarkup:
     if idx < total - 1:
         nav.append(InlineKeyboardButton("▶️", callback_data=f"browse:next:{idx}"))
 
+    char = CHARACTERS[idx]
+    mood = db.get_char_mood(char_id)
     return InlineKeyboardMarkup([
         nav,
-        [InlineKeyboardButton(f"💬 Chat with {CHARACTERS[idx]['name']}", callback_data=f"choose:{char_id}")],
+        [InlineKeyboardButton(f"Mood: {mood}", callback_data="noop")],
+        [InlineKeyboardButton(f"💬 Chat with {char['name']}", callback_data=f"choose:{char_id}")],
         [InlineKeyboardButton("❌ Close", callback_data="browse:cancel")],
     ])
 
-
-async def _send_card_new(message, uid: int, idx: int):
+async def _send_card(message, uid: int, idx: int):
     char = CHARACTERS[idx]
     pic  = get_char_pic(char)
     text = build_card_text(char, idx, len(CHARACTERS))
-    kb   = _browse_keyboard(idx, char["id"])
+    kb   = _browse_kb(idx, char["id"])
     get_state(uid)["browse_idx"] = idx
-
     if pic:
         await message.reply_photo(photo=pic, caption=text,
                                    parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     else:
         await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
-
 async def cmd_meet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
+    user = update.effective_user
     ok, msg = can_use_bot(user.id)
     if not ok:
         await update.message.reply_text(msg)
         return
-    await _send_card_new(update.message, user.id, 0)
-
+    await _send_card(update.message, user.id, 0)
 
 async def cb_browse(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
@@ -474,16 +510,15 @@ async def cb_browse(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
 
     if action == "cancel":
-        await query.edit_message_text("👋 Browse band kiya. /meet se dobara shuru karo.")
+        await query.edit_message_text("👋 /meet se dobara.")
         return
 
     idx = int(parts[2])
     new_idx = (idx + 1) % len(CHARACTERS) if action == "next" else max(0, idx - 1)
-
     char = CHARACTERS[new_idx]
     pic  = get_char_pic(char)
     text = build_card_text(char, new_idx, len(CHARACTERS))
-    kb   = _browse_keyboard(new_idx, char["id"])
+    kb   = _browse_kb(new_idx, char["id"])
     get_state(uid)["browse_idx"] = new_idx
 
     try:
@@ -500,7 +535,6 @@ async def cb_browse(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
-
 async def cb_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
     await query.answer("💞 Connected!")
@@ -512,20 +546,24 @@ async def cb_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     state = get_state(uid)
-    state.update({"mode": "character", "character": char_id, "history": []})
+    state.update({"mode": "character", "character": char_id, "history": [], "game": None})
 
-    pts   = db.get_relationship(uid, char_id)
-    rlbl  = db.get_relationship_label(pts)
-    prof  = db.get_profile(uid)
+    pts  = db.get_relationship(uid, char_id)
+    rlbl = db.get_relationship_label(pts)
+    mood = db.get_char_mood(char_id)
+    prof = db.get_profile(uid)
     uname = prof.get("name") or query.from_user.first_name
+
+    # Award badge
+    await db.award_badge(uid, "char_met")
 
     greeting = (
         f"💞 *{char['name']}* se connected!\n\n"
         f"_{char['intro']}_\n\n"
-        f"Relationship: {rlbl}\n\n"
-        f"_/leave — wapas jaao | /menu — options_"
+        f"Mood today: {mood}\n"
+        f"Relationship: {rlbl} ({pts} pts)\n\n"
+        f"_/leave — wapas | /games — games | /gift — gift bhejo_"
     )
-
     try:
         if get_char_pic(char):
             await query.edit_message_caption(caption=greeting, parse_mode=ParseMode.MARKDOWN)
@@ -534,25 +572,203 @@ async def cb_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await ctx.bot.send_message(uid, greeting, parse_mode=ParseMode.MARKDOWN)
 
-
 async def cmd_leave(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user  = update.effective_user
-    state = get_state(user.id)
-    if state.get("mode") == "character":
-        char = get_character(state["character"])
-        name = char["name"] if char else "Character"
-        state.update({"mode": "ai", "character": None, "history": []})
+    uid   = update.effective_user.id
+    state = get_state(uid)
+    if state["mode"] in ("character", "game"):
+        char  = get_character(state["character"]) if state["character"] else None
+        name  = char["name"] if char else "Game"
+        state.update({"mode": "ai", "character": None, "history": [], "game": None})
         await update.message.reply_text(
-            f"👋 *{name}* se bye!\n\nAb normal AI mode mein ho. /meet se dobara milo!",
+            f"👋 *{name}* se bye!\n\nAb AI mode mein. /meet se dobara milo!",
             parse_mode=ParseMode.MARKDOWN,
         )
     else:
-        await update.message.reply_text("ℹ️ Abhi character mode mein nahi ho.")
+        await update.message.reply_text("ℹ️ Abhi character mode nahi.")
 
 
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
+#  GIFT SYSTEM
+# ════════════════════════════════════════════════════════════
+GIFTS = {
+    "rose":     ("🌹", "Rose",          5,  "Tumhara yeh gesture bahut sweet tha!"),
+    "coffee":   ("☕", "Coffee",         3,  "Aww coffee bheja! Bilkul tumhari tarah warm!"),
+    "star":     ("⭐", "Star",           8,  "OMG tumne mujhe star diya! Main blush kar rahi hoon!"),
+    "heart":    ("❤️", "Heart",         10, "Yeh toh bahut special hai... dil se shukriya!"),
+    "diamond":  ("💎", "Diamond",       20, "Diamond?! Tum serious ho?! Main... I'm speechless!"),
+    "cake":     ("🎂", "Cake",           7,  "Cake! Main khush ho gayi! Let's celebrate together!"),
+}
+
+def gift_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    items = list(GIFTS.items())
+    for i in range(0, len(items), 3):
+        rows.append([
+            InlineKeyboardButton(f"{v[0]} {v[1]} (+{v[2]}pts)", callback_data=f"gift:{k}")
+            for k, v in items[i:i+3]
+        ])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="gift:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+async def cmd_gift(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid   = update.effective_user.id
+    state = get_state(uid)
+    if state["mode"] != "character":
+        await update.message.reply_text("💝 Gift dene ke liye pehle kisi character se /meet karo!")
+        return
+    char = get_character(state["character"])
+    await update.message.reply_text(
+        f"🎁 *{char['name']} ko kya bhejein?*",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=gift_keyboard(),
+    )
+
+async def cb_gift(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    await query.answer()
+    uid    = query.from_user.id
+    gkey   = query.data.split(":", 1)[1]
+
+    if gkey == "cancel":
+        await query.edit_message_text("💝 Gift cancel kar diya.")
+        return
+
+    state = get_state(uid)
+    if state["mode"] != "character":
+        await query.edit_message_text("❌ Pehle kisi character se chat shuru karo.")
+        return
+
+    gift = GIFTS.get(gkey)
+    if not gift:
+        return
+
+    char = get_character(state["character"])
+    emoji, name, pts, reaction = gift
+
+    await db.add_relationship_point(uid, state["character"], pts)
+    new_pts = db.get_relationship(uid, state["character"])
+    rlbl    = db.get_relationship_label(new_pts)
+
+    await query.edit_message_text(
+        f"{emoji} *Tumne {char['name']} ko {name} bheja!*\n\n"
+        f"_{char['name']}: {reaction}_\n\n"
+        f"Relationship: {rlbl} (+{pts} pts → {new_pts} total)",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    # Check new badges
+    new_b = await db.check_and_award_badges(uid)
+    for bk in new_b:
+        b = db.BADGE_DEFINITIONS.get(bk, ("🏅", bk, ""))
+        await ctx.bot.send_message(
+            uid,
+            f"🎉 *Badge Unlocked!*\n\n{b[0]} *{b[1]}*\n_{b[2]}_",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
+# ════════════════════════════════════════════════════════════
+#  GAMES
+# ════════════════════════════════════════════════════════════
+async def cmd_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not can_use_bot(user.id)[0]:
+        await update.message.reply_text(can_use_bot(user.id)[1])
+        return
+    await update.message.reply_text(
+        "🎮 *Games Menu*\n\nKaunsa game khelna hai?",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=gm.games_menu_keyboard(),
+    )
+
+async def cmd_endgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    state = get_state(update.effective_user.id)
+    if state["mode"] == "game":
+        state.update({"mode": "ai", "game": None, "history": []})
+        await update.message.reply_text("🎮 Game khatam. /games se dobara khelo!")
+    else:
+        await update.message.reply_text("ℹ️ Koi game active nahi.")
+
+async def cb_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    await query.answer()
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1]
+
+    if action == "close":
+        await query.edit_message_text("🎮 Games menu closed.")
+        return
+
+    if action == "start":
+        game = parts[2]
+        state = get_state(uid)
+        state.update({"mode": "game", "game": game, "history": []})
+
+        if game == "tod":
+            text, kb = gm.tod_start()
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+        elif game == "20q":
+            text = gm.twenty_q_start()
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+            state["history"].append({"role": "system", "content": gm.twenty_q_system_prompt()})
+
+        elif game == "story":
+            prof  = db.get_profile(uid)
+            uname = prof.get("name") or query.from_user.first_name
+            # Use active character if in character mode, else default
+            char  = get_character(state.get("character")) if state.get("character") else None
+            char_name = char["name"] if char else "Luna"
+            text  = gm.story_start(uname)
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+            state["history"].append({"role": "system", "content": gm.story_system_prompt(char_name)})
+
+        elif game == "horo":
+            await query.edit_message_text(
+                "🔮 *Daily Horoscope*\n\nApna zodiac sign chunein:",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=gm.horoscope_keyboard(),
+            )
+
+        elif game == "spin":
+            result = gm.spin_wheel()
+            state.update({"mode": "ai", "game": None})
+            await query.edit_message_text(result, parse_mode=ParseMode.MARKDOWN)
+
+        # Award gamer badge
+        await db.award_badge(uid, "gamer")
+
+    elif action == "tod":
+        choice = parts[2]
+        if choice == "end":
+            get_state(uid).update({"mode": "ai", "game": None})
+            await query.edit_message_text("🎮 Truth or Dare khatam! /games se dobara khelo.")
+            return
+        text, kb = gm.tod_play(choice)
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    elif action == "horo":
+        sign  = parts[2]
+        state = get_state(uid)
+        char  = get_character(state.get("character")) if state.get("character") else None
+        char_name = char["name"] if char else "Aria"
+        sys_p = gm.horoscope_system_prompt(char_name, sign)
+        msgs  = [{"role": "system", "content": sys_p},
+                 {"role": "user", "content": f"Give me my {sign} horoscope for today."}]
+        await query.edit_message_text(f"🔮 Reading your {sign} horoscope...")
+        try:
+            full = ""
+            async for chunk in stream_ai_response(state["provider"], state["model"], msgs):
+                full += chunk
+            state.update({"mode": "ai", "game": None})
+            await query.edit_message_text(f"🔮 *{sign} Horoscope*\n\n{full}", parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error: {e}")
+
+
+# ════════════════════════════════════════════════════════════
 #  MODEL PICKER
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 def _provider_keyboard() -> InlineKeyboardMarkup:
     active = get_active_providers()
     return InlineKeyboardMarkup([
@@ -560,12 +776,10 @@ def _provider_keyboard() -> InlineKeyboardMarkup:
         for p in active
     ])
 
-
 async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    ok, msg = can_use_bot(user.id)
-    if not ok:
-        await update.message.reply_text(msg)
+    user = update.effective_user
+    if not can_use_bot(user.id)[0]:
+        await update.message.reply_text(can_use_bot(user.id)[1])
         return
     if not get_active_providers():
         await update.message.reply_text("⚠️ Koi API key set nahi.")
@@ -575,7 +789,6 @@ async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=_provider_keyboard(),
     )
-
 
 async def cb_provider(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query    = update.callback_query
@@ -588,26 +801,23 @@ async def cb_provider(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [[InlineKeyboardButton("⬅️ Back", callback_data="back:providers")]]
     )
     await query.edit_message_text(
-        f"🤖 *{AVAILABLE_MODELS[provider]['name']}* — Model chunein:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb,
+        f"🤖 *{AVAILABLE_MODELS[provider]['name']}* — model chunein:",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb,
     )
 
-
 async def cb_model_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query              = update.callback_query
+    query           = update.callback_query
     await query.answer()
-    _, provider, mid   = query.data.split(":", 2)
-    state              = get_state(query.from_user.id)
+    _, provider, mid = query.data.split(":", 2)
+    state = get_state(query.from_user.id)
     state.update({"provider": provider, "model": mid, "history": [],
-                  "mode": "ai", "character": None})
+                  "mode": "ai", "character": None, "game": None})
     label = get_model_label(provider, mid)
     pname = AVAILABLE_MODELS.get(provider, {}).get("name", provider)
     await query.edit_message_text(
         f"✅ *Model set!*\n\nProvider : {pname}\nModel : `{label}`",
         parse_mode=ParseMode.MARKDOWN,
     )
-
 
 async def cb_back_providers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -619,49 +829,31 @@ async def cb_back_providers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 #  OWNER COMMANDS
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 def _stats_text() -> str:
     s = db.get_global_stats()
     return (
         f"📈 *Bot Stats*\n\n"
-        f"👥 Total Users    : {s['total_users']}\n"
-        f"🔨 Banned         : {s['banned']}\n"
-        f"💬 Msgs Today     : {s['msgs_today']}\n"
-        f"📨 Total Msgs     : {s['total_msgs']}\n"
-        f"🗄️ MongoDB        : {'✅ Connected' if s['mongo_enabled'] else '⚠️ In-memory only'}\n"
+        f"👥 Users     : {s['total_users']}\n"
+        f"🔨 Banned    : {s['banned']}\n"
+        f"💬 Today     : {s['msgs_today']}\n"
+        f"🟢 Active    : {s['active_today']}\n"
+        f"📨 Total     : {s['total_msgs']}\n"
+        f"🗄️ MongoDB  : {'✅' if s['mongo_enabled'] else '⚠️ In-memory'}"
     )
 
-def _users_text() -> str:
-    allowed = db.get_allowed_users()
-    banned  = db.get_banned_users()
-    if not allowed and not banned:
-        return "📭 Koi user nahi hai abhi."
-    lines = []
-    if allowed:
-        lines.append("✅ *Allowed:*")
-        for uid, info in list(allowed.items())[:20]:
-            uname = f"@{info['username']}" if info.get("username") else "—"
-            lim   = info.get("limit")
-            used  = db.get_usage_today(uid)
-            lines.append(f"  `{uid}` {uname} | {used}/{lim or '∞'}")
-    if banned:
-        lines.append("\n🔨 *Banned:*")
-        for uid in list(banned)[:10]:
-            lines.append(f"  `{uid}`")
-    return "\n".join(lines)
-
-
-@owner_only
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Owner only.")
+        return
     await update.message.reply_text(_stats_text(), parse_mode=ParseMode.MARKDOWN)
-
 
 @owner_only
 async def cmd_adduser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("Usage: `/adduser <id/@user> [limit]`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("Usage: `/adduser <id> [limit]`", parse_mode=ParseMode.MARKDOWN)
         return
     uid = parse_uid(ctx.args[0])
     if uid is None:
@@ -676,10 +868,9 @@ async def cmd_adduser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uname = ctx.args[0].lstrip("@") if not ctx.args[0].lstrip("@").isdigit() else ""
     await db.add_allowed_user(uid, uname, limit, update.effective_user.id)
     await update.message.reply_text(
-        f"✅ `{uid}` added! Limit: {f'{limit} msgs/day' if limit else 'Unlimited'}",
+        f"✅ `{uid}` added! Limit: {f'{limit}/day' if limit else 'Unlimited'}",
         parse_mode=ParseMode.MARKDOWN,
     )
-
 
 @owner_only
 async def cmd_removeuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -694,7 +885,6 @@ async def cmd_removeuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ User nahi mila.")
 
-
 @owner_only
 async def cmd_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -702,7 +892,7 @@ async def cmd_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     uid = parse_uid(ctx.args[0])
     if uid is None:
-        await update.message.reply_text("❌ Valid ID daalo.")
+        await update.message.reply_text("❌ Valid ID.")
         return
     if is_owner(uid):
         await update.message.reply_text("🚫 Owner ko ban nahi kar sakte!")
@@ -710,7 +900,6 @@ async def cmd_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await db.ban_user(uid)
     user_states.pop(uid, None)
     await update.message.reply_text(f"🔨 `{uid}` banned.", parse_mode=ParseMode.MARKDOWN)
-
 
 @owner_only
 async def cmd_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -722,13 +911,12 @@ async def cmd_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await db.unban_user(uid)
         await update.message.reply_text(f"✅ `{uid}` unbanned.", parse_mode=ParseMode.MARKDOWN)
     else:
-        await update.message.reply_text("❌ Ban list mein nahi hai.")
-
+        await update.message.reply_text("❌ Banned list mein nahi.")
 
 @owner_only
 async def cmd_setlimit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/setlimit <id> <N>` (0=unlimited)", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("Usage: `/setlimit <id> <N>` (0=∞)", parse_mode=ParseMode.MARKDOWN)
         return
     uid = parse_uid(ctx.args[0])
     if uid is None:
@@ -741,15 +929,60 @@ async def cmd_setlimit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await db.set_user_limit(uid, n if n > 0 else None)
     await update.message.reply_text(
-        f"✅ `{uid}` limit: *{f'{n} msgs/day' if n > 0 else 'Unlimited'}*",
+        f"✅ `{uid}` limit: *{f'{n}/day' if n > 0 else 'Unlimited'}*",
         parse_mode=ParseMode.MARKDOWN,
     )
 
-
 @owner_only
 async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(_users_text(), parse_mode=ParseMode.MARKDOWN)
+    allowed = db.get_allowed_users()
+    banned  = db.get_banned_users()
+    if not allowed and not banned:
+        await update.message.reply_text("📭 Koi user nahi.")
+        return
+    lines = []
+    if allowed:
+        lines.append("✅ *Allowed:*")
+        for uid, info in list(allowed.items())[:20]:
+            uname = f"@{info['username']}" if info.get("username") else "—"
+            lim   = info.get("limit")
+            used  = db.get_usage_today(uid)
+            act   = db.get_activity(uid)
+            last  = act.get("last_seen")
+            last_str = last.strftime("%d/%m %H:%M") if last else "never"
+            lines.append(f"  `{uid}` {uname} | {used}/{lim or '∞'} | last: {last_str}")
+    if banned:
+        lines.append("\n🔨 *Banned:*")
+        for uid in list(banned)[:10]:
+            lines.append(f"  `{uid}`")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
+@owner_only
+async def cmd_finduser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/finduser <@username or name or id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    results = db.search_user(ctx.args[0])
+    if not results:
+        await update.message.reply_text("🔍 Koi user nahi mila.")
+        return
+    lines = ["🔍 *Search Results:*\n"]
+    for uid, info in results:
+        prof  = db.get_profile(uid)
+        act   = db.get_activity(uid)
+        last  = act.get("last_seen")
+        last_str = last.strftime("%d/%m %H:%M") if last else "never"
+        name  = prof.get("name", "—")
+        uname = f"@{info.get('username', '—')}"
+        total = db.get_total_messages(uid)
+        today = db.get_usage_today(uid)
+        lim   = info.get("limit")
+        lines.append(
+            f"`{uid}` {uname}\n"
+            f"  Name: {name} | Msgs: {total} (today: {today}/{lim or '∞'})\n"
+            f"  Last seen: {last_str}"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 @owner_only
 async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -767,6 +1000,56 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             failed += 1
     await update.message.reply_text(f"📢 Sent: {sent} | Failed: {failed}")
 
+@owner_only
+async def cmd_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /schedule HH:MM <message> — schedule daily broadcast"""
+    if not ctx.args or len(ctx.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/schedule HH:MM <message>`\nExample: `/schedule 09:00 Good morning! ☀️`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    time_str = ctx.args[0]
+    try:
+        hh, mm = time_str.split(":")
+        int(hh); int(mm)
+    except Exception:
+        await update.message.reply_text("❌ Time format: HH:MM (e.g. 09:00)")
+        return
+    msg = " ".join(ctx.args[1:])
+    sid = str(uuid.uuid4())[:8]
+    sched = {"id": sid, "time": time_str, "message": msg, "active": True}
+    await db.add_schedule(sched)
+    # Register with APScheduler if running
+    _register_schedule(sched, ctx.bot)
+    await update.message.reply_text(
+        f"⏰ *Scheduled!*\nID: `{sid}`\nTime: {time_str} daily\nMsg: {msg}",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+@owner_only
+async def cmd_unschedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Usage: `/unschedule <id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    sid = ctx.args[0]
+    await db.remove_schedule(sid)
+    try:
+        _scheduler.remove_job(sid)
+    except Exception:
+        pass
+    await update.message.reply_text(f"✅ Schedule `{sid}` removed.", parse_mode=ParseMode.MARKDOWN)
+
+@owner_only
+async def cmd_schedules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    scheds = db.get_schedules()
+    if not scheds:
+        await update.message.reply_text("📭 Koi schedule nahi.")
+        return
+    lines = ["⏰ *Active Schedules:*\n"]
+    for s in scheds:
+        lines.append(f"`{s['id']}` — {s['time']} — {s['message'][:40]}...")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 @owner_only
 async def cmd_setprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -782,7 +1065,6 @@ async def cmd_setprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
-
 @owner_only
 async def cmd_viewprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     tag = " _(default)_" if current_system_prompt == DEFAULT_SYSTEM_PROMPT else " _(custom)_"
@@ -790,7 +1072,6 @@ async def cmd_viewprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📋 *System Prompt*{tag}\n\n`{current_system_prompt}`",
         parse_mode=ParseMode.MARKDOWN,
     )
-
 
 @owner_only
 async def cmd_resetprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -801,9 +1082,9 @@ async def cmd_resetprompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Prompt reset to default.", parse_mode=ParseMode.MARKDOWN)
 
 
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 #  MAIN MESSAGE HANDLER
-# ═══════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user    = update.effective_user
     ok, msg = can_use_bot(user.id)
@@ -811,9 +1092,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    # Profile edit in progress?
-    if await handle_profile_edit(update, ctx):
+    # Anti-spam check
+    if not is_owner(user.id) and db.check_spam(user.id):
+        await db.auto_ban_user(user.id, reason="spam")
+        user_states.pop(user.id, None)
+        await update.message.reply_text(
+            "🔨 *Auto-ban:* Bohot fast messages bhej rahe the.\n"
+            "Owner se unban ke liye contact karein.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
+
+    # Update activity
+    db.update_activity(user.id, getattr(user, "username", "") or "", user.first_name)
 
     state     = get_state(user.id)
     user_text = update.message.text.strip()
@@ -823,61 +1114,218 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if state["mode"] == "character":
         char       = get_character(state["character"])
         sys_prompt = char["prompt"] if char else current_system_prompt
-        # Inject user profile into character context
         prof = db.get_profile(user.id)
         if prof.get("name"):
-            sys_prompt += f"\n\nUser's name is {prof['name']}."
+            sys_prompt += f"\n\nUser ka naam {prof['name']} hai."
         if prof.get("bio"):
-            sys_prompt += f" They describe themselves as: {prof['bio']}."
+            sys_prompt += f" Unke baare mein: {prof['bio']}."
+        mood = db.get_char_mood(state["character"])
+        sys_prompt += f"\n\nAaj tumhara mood {mood} hai — iske hisaab se reply karo."
+
+    elif state["mode"] == "game":
+        # Game conversation — use game-specific system prompt if present
+        if state["history"] and state["history"][0].get("role") == "system":
+            sys_prompt = state["history"][0]["content"]
+            state["history"] = state["history"][1:]  # will be re-prepended
+        else:
+            sys_prompt = current_system_prompt
     else:
         sys_prompt = current_system_prompt
 
     state["history"].append({"role": "user", "content": user_text})
     msgs = [{"role": "system", "content": sys_prompt}] + state["history"]
 
+    # Trim history
+    if len(state["history"]) > config.MAX_HISTORY:
+        state["history"] = state["history"][-config.MAX_HISTORY:]
+
     try:
-        reply = await get_ai_response(
-            provider=state["provider"],
-            model=state["model"],
-            messages=msgs,
-        )
-        state["history"].append({"role": "assistant", "content": reply})
-        if len(state["history"]) > config.MAX_HISTORY:
-            state["history"] = state["history"][-config.MAX_HISTORY:]
+        reply = await send_streaming(update, state["provider"], state["model"], msgs)
 
-        # Usage tracking
-        if not is_owner(user.id):
+        if reply:
+            state["history"].append({"role": "assistant", "content": reply})
+
+            # Usage tracking
             db.record_usage(user.id)
-        else:
-            db.record_usage(user.id)  # track owners too for stats
+            await db.persist_usage(user.id)
 
-        # Relationship point for character chats
-        if state["mode"] == "character" and state["character"]:
-            await db.add_relationship_point(user.id, state["character"])
+            # Relationship + badges for character mode
+            if state["mode"] == "character" and state["character"]:
+                await db.add_relationship_point(user.id, state["character"])
 
-        await db.persist_usage(user.id)
+            new_b = await db.check_and_award_badges(user.id)
+            for bk in new_b:
+                b = db.BADGE_DEFINITIONS.get(bk, ("🏅", bk, ""))
+                await update.message.reply_text(
+                    f"🎉 *Badge Unlocked!* {b[0]} *{b[1]}*\n_{b[2]}_",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
 
-        # Send reply (split if >4000 chars)
-        for i in range(0, max(len(reply), 1), 4000):
-            await update.message.reply_text(reply[i:i + 4000])
-
-    except Exception as exc:
-        logger.error("AI error [%s/%s]: %s", state["provider"], state["model"], exc, exc_info=True)
+    except Exception:
+        # Error already shown by send_streaming
         if state["history"] and state["history"][-1]["role"] == "user":
             state["history"].pop()
-        await update.message.reply_text(
-            f"❌ *Error:* `{exc}`\n\nDusra model try karein → /model",
-            parse_mode=ParseMode.MARKDOWN,
+
+
+# ════════════════════════════════════════════════════════════
+#  SCHEDULER
+# ════════════════════════════════════════════════════════════
+_scheduler    = None
+_bot_instance = None
+
+def _register_schedule(sched: dict, bot):
+    if _scheduler is None:
+        return
+    async def _send():
+        targets = set(db.get_allowed_users().keys()) | config.OWNER_IDS
+        for uid in targets:
+            try:
+                await bot.send_message(uid, f"⏰ *Scheduled Message:*\n\n{sched['message']}",
+                                       parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+    try:
+        hh, mm = sched["time"].split(":")
+        _scheduler.add_job(
+            lambda s=sched, b=bot: asyncio.create_task(_send()),
+            trigger="cron",
+            hour=int(hh),
+            minute=int(mm),
+            id=sched["id"],
+            replace_existing=True,
         )
+    except Exception as e:
+        logger.warning("Schedule register failed: %s", e)
+
+def start_scheduler(bot):
+    global _scheduler, _bot_instance
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        _scheduler    = AsyncIOScheduler()
+        _bot_instance = bot
+        for sched in db.get_schedules():
+            _register_schedule(sched, bot)
+        _scheduler.start()
+        logger.info("✅ Scheduler started")
+    except Exception as e:
+        logger.warning("Scheduler failed to start: %s", e)
 
 
-# ═══════════════════════════════════════════════════════
-#  APP SETUP + MAIN
-# ═══════════════════════════════════════════════════════
-def build_app() -> Application:
+# ════════════════════════════════════════════════════════════
+#  WEB DASHBOARD  (FastAPI)
+# ════════════════════════════════════════════════════════════
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Bot Dashboard</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#e2e8f0;min-height:100vh}
+  .header{background:linear-gradient(135deg,#6366f1,#8b5cf6,#ec4899);padding:24px 32px;display:flex;align-items:center;gap:16px}
+  .header h1{font-size:1.6rem;font-weight:700}
+  .header span{font-size:2rem}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;padding:28px 32px}
+  .card{background:#1e1e2e;border-radius:16px;padding:24px;border:1px solid #2d2d44}
+  .card .num{font-size:2.2rem;font-weight:800;background:linear-gradient(135deg,#6366f1,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .card .label{color:#94a3b8;font-size:.85rem;margin-top:6px}
+  .section{padding:0 32px 28px}
+  .section h2{font-size:1.1rem;color:#a78bfa;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+  .table{width:100%;border-collapse:collapse}
+  .table th{background:#2d2d44;padding:10px 14px;text-align:left;font-size:.8rem;color:#94a3b8;text-transform:uppercase}
+  .table td{padding:10px 14px;border-bottom:1px solid #2d2d44;font-size:.9rem}
+  .table tr:hover td{background:#2d2d44}
+  .badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:.75rem;font-weight:600}
+  .badge.green{background:#064e3b;color:#34d399}
+  .badge.red{background:#450a0a;color:#f87171}
+  .badge.blue{background:#1e3a5f;color:#60a5fa}
+  .status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+  .online{background:#34d399}.offline{background:#6b7280}
+  footer{text-align:center;padding:20px;color:#4a5568;font-size:.8rem}
+</style>
+</head>
+<body>
+<div class="header">
+  <span>🤖</span>
+  <div><h1>AI Bot Dashboard</h1><div style="font-size:.85rem;opacity:.8">Live Stats</div></div>
+  <div style="margin-left:auto;font-size:.85rem;opacity:.7" id="upd"></div>
+</div>
+
+<div class="grid" id="stats-grid">
+  <div class="card"><div class="num" id="s-users">—</div><div class="label">👥 Total Users</div></div>
+  <div class="card"><div class="num" id="s-today">—</div><div class="label">💬 Msgs Today</div></div>
+  <div class="card"><div class="num" id="s-total">—</div><div class="label">📨 All-time Msgs</div></div>
+  <div class="card"><div class="num" id="s-active">—</div><div class="label">🟢 Active Today</div></div>
+  <div class="card"><div class="num" id="s-banned">—</div><div class="label">🔨 Banned</div></div>
+  <div class="card"><div class="num" id="s-mongo">—</div><div class="label">🗄️ MongoDB</div></div>
+</div>
+
+<div class="section">
+  <h2>🏆 Leaderboard</h2>
+  <table class="table">
+    <thead><tr><th>#</th><th>User</th><th>Total Msgs</th><th>Today</th></tr></thead>
+    <tbody id="lb-body"></tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>📋 Recent Activity</h2>
+  <table class="table">
+    <thead><tr><th>User ID</th><th>Name</th><th>Last Seen</th><th>Status</th></tr></thead>
+    <tbody id="act-body"></tbody>
+  </table>
+</div>
+
+<footer>➵⋆🪐ᴛᴇᴄʜɴɪᴄᴀʟ_sᴇʀᴇɴᴀ𓂃 · AI Bot Dashboard</footer>
+
+<script>
+const medals=['🥇','🥈','🥉'];
+async function load(){
+  try{
+    const r=await fetch('/api/stats');
+    const d=await r.json();
+    document.getElementById('s-users').textContent=d.stats.total_users;
+    document.getElementById('s-today').textContent=d.stats.msgs_today;
+    document.getElementById('s-total').textContent=d.stats.total_msgs;
+    document.getElementById('s-active').textContent=d.stats.active_today;
+    document.getElementById('s-banned').textContent=d.stats.banned;
+    document.getElementById('s-mongo').textContent=d.stats.mongo_enabled?'✅':'⚠️';
+
+    const lb=document.getElementById('lb-body');
+    lb.innerHTML=d.leaderboard.map((u,i)=>
+      `<tr><td>${medals[i]||'#'+(i+1)}</td><td>${u.name}</td><td>${u.total}</td><td>${u.today}</td></tr>`
+    ).join('');
+
+    const now=Date.now();
+    const act=document.getElementById('act-body');
+    act.innerHTML=d.activity.map(u=>{
+      const diff=Math.round((now-u.ts*1000)/60000);
+      const online=diff<10;
+      const when=diff<1?'Just now':diff<60?diff+'m ago':Math.round(diff/60)+'h ago';
+      return `<tr>
+        <td><code>${u.uid}</code></td>
+        <td>${u.name||'—'}</td>
+        <td>${when}</td>
+        <td><span class="status-dot ${online?'online':'offline'}"></span>${online?'Online':'Offline'}</td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('upd').textContent='Updated: '+new Date().toLocaleTimeString();
+  }catch(e){console.error(e)}
+}
+load();setInterval(load,15000);
+</script>
+</body>
+</html>"""
+
+
+# ════════════════════════════════════════════════════════════
+#  PTB APPLICATION
+# ════════════════════════════════════════════════════════════
+def build_ptb_app() -> Application:
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-    # Standard
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("help",        cmd_help))
     app.add_handler(CommandHandler("menu",        cmd_menu))
@@ -888,8 +1336,12 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("meet",        cmd_meet))
     app.add_handler(CommandHandler("leave",       cmd_leave))
     app.add_handler(CommandHandler("profile",     cmd_profile))
+    app.add_handler(CommandHandler("games",       cmd_games))
+    app.add_handler(CommandHandler("endgame",     cmd_endgame))
+    app.add_handler(CommandHandler("top",         cmd_top))
+    app.add_handler(CommandHandler("badges",      cmd_badges))
+    app.add_handler(CommandHandler("gift",        cmd_gift))
 
-    # Owner
     app.add_handler(CommandHandler("stats",       cmd_stats))
     app.add_handler(CommandHandler("adduser",     cmd_adduser))
     app.add_handler(CommandHandler("removeuser",  cmd_removeuser))
@@ -897,54 +1349,121 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("unban",       cmd_unban))
     app.add_handler(CommandHandler("setlimit",    cmd_setlimit))
     app.add_handler(CommandHandler("users",       cmd_users))
+    app.add_handler(CommandHandler("finduser",    cmd_finduser))
     app.add_handler(CommandHandler("broadcast",   cmd_broadcast))
+    app.add_handler(CommandHandler("schedule",    cmd_schedule))
+    app.add_handler(CommandHandler("unschedule",  cmd_unschedule))
+    app.add_handler(CommandHandler("schedules",   cmd_schedules))
     app.add_handler(CommandHandler("setprompt",   cmd_setprompt))
     app.add_handler(CommandHandler("viewprompt",  cmd_viewprompt))
     app.add_handler(CommandHandler("resetprompt", cmd_resetprompt))
 
-    # Callbacks
     app.add_handler(CallbackQueryHandler(cb_menu,           pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(cb_browse,         pattern=r"^browse:"))
     app.add_handler(CallbackQueryHandler(cb_choose,         pattern=r"^choose:"))
-    app.add_handler(CallbackQueryHandler(cb_profile,        pattern=r"^profile:"))
+    app.add_handler(CallbackQueryHandler(cb_gift,           pattern=r"^gift:"))
+    app.add_handler(CallbackQueryHandler(cb_game,           pattern=r"^game:"))
     app.add_handler(CallbackQueryHandler(cb_provider,       pattern=r"^prov:"))
     app.add_handler(CallbackQueryHandler(cb_model_select,   pattern=r"^model:"))
     app.add_handler(CallbackQueryHandler(cb_back_providers, pattern=r"^back:providers$"))
-    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern=r"^noop$"))
-
-    # Messages
+    app.add_handler(CallbackQueryHandler(lambda u,c: u.callback_query.answer(), pattern=r"^noop$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     return app
 
 
-async def post_init(app: Application):
-    """Called after app is initialized — init DB."""
-    await db.init_db()
+# ════════════════════════════════════════════════════════════
+#  FASTAPI APP + LIFESPAN
+# ════════════════════════════════════════════════════════════
+_ptb_app: Application = None
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _ptb_app
+    _ptb_app = build_ptb_app()
+    await _ptb_app.initialize()
+    await db.init_db()
+    if config.WEBHOOK_URL:
+        await _ptb_app.bot.set_webhook(
+            f"{config.WEBHOOK_URL}/webhook",
+            allowed_updates=Update.ALL_TYPES,
+        )
+        logger.info("Webhook set: %s/webhook", config.WEBHOOK_URL)
+    await _ptb_app.start()
+    start_scheduler(_ptb_app.bot)
+    yield
+    logger.info("Shutting down...")
+    await _ptb_app.stop()
+    await _ptb_app.shutdown()
+    if _scheduler:
+        _scheduler.shutdown()
+
+web_app = FastAPI(lifespan=lifespan)
+
+@web_app.get("/")
+async def health():
+    return {"ok": True, "status": "running"}
+
+@web_app.post("/webhook")
+async def telegram_webhook(request: Request):
+    try:
+        body   = await request.body()
+        update = Update.de_json(json.loads(body), _ptb_app.bot)
+        await _ptb_app.process_update(update)
+    except Exception as e:
+        logger.error("Webhook error: %s", e)
+    return Response(status_code=200)
+
+@web_app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    return DASHBOARD_HTML
+
+@web_app.get("/api/stats")
+async def api_stats():
+    stats = db.get_global_stats()
+    board = db.get_leaderboard(10)
+    lb_data = []
+    for uid, total in board:
+        prof  = db.get_profile(uid)
+        info  = db.get_allowed_users().get(uid, {})
+        name  = prof.get("name") or info.get("username") or f"User {uid}"
+        lb_data.append({"uid": uid, "name": name, "total": total,
+                        "today": db.get_usage_today(uid)})
+    activity = []
+    for uid, act in list(db.get_all_activity().items())[:20]:
+        last = act.get("last_seen")
+        activity.append({
+            "uid":  uid,
+            "name": act.get("first_name") or act.get("username") or str(uid),
+            "ts":   int(last.timestamp()) if last else 0,
+        })
+    activity.sort(key=lambda x: x["ts"], reverse=True)
+    return JSONResponse({"stats": stats, "leaderboard": lb_data, "activity": activity[:15]})
+
+
+# ════════════════════════════════════════════════════════════
+#  ENTRY POINT
+# ════════════════════════════════════════════════════════════
+async def _polling_mode():
+    """Local development: polling without FastAPI."""
+    ptb = build_ptb_app()
+    await db.init_db()
+    async with ptb:
+        await ptb.start()
+        await ptb.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Polling mode — Ctrl+C to stop")
+        await asyncio.Event().wait()
 
 def main():
     if not config.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set!")
-
-    app = build_app()
-    app.post_init = post_init
-
     if config.WEBHOOK_URL:
-        webhook_path = "webhook"
-        full_url     = f"{config.WEBHOOK_URL}/{webhook_path}"
-        logger.info("WEBHOOK → port %s | %s", config.PORT, full_url)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=config.PORT,
-            url_path=webhook_path,
-            webhook_url=full_url,
-            allowed_updates=Update.ALL_TYPES,
-        )
+        # Production: FastAPI + uvicorn
+        logger.info("Starting uvicorn on port %s", config.PORT)
+        uvicorn.run(web_app, host="0.0.0.0", port=config.PORT, log_level="info")
     else:
-        logger.info("POLLING mode")
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
-
+        # Local dev: PTB polling
+        asyncio.run(_polling_mode())
 
 if __name__ == "__main__":
     main()

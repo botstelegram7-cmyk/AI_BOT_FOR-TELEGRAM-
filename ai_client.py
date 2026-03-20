@@ -1,10 +1,17 @@
 """
-ai_client.py — Unified AI provider abstraction.
-Supports: OpenAI · Anthropic · Grok · Gemini · Groq · SambaNova · OpenRouter · NVIDIA
+ai_client.py — Unified async streaming AI client.
+All providers yield text chunks via async generators → ChatGPT-like typing in Telegram.
+
+Fixes:
+  • Gemini: removed unavailable preview models, uses stable IDs
+  • OpenRouter: proper timeout + retry, updated free model list
+  • NVIDIA: OpenAI-compat base URL
 """
 
 import asyncio
 import logging
+from typing import AsyncGenerator
+
 import config
 
 logger = logging.getLogger(__name__)
@@ -15,7 +22,6 @@ logger = logging.getLogger(__name__)
 AVAILABLE_MODELS: dict[str, dict] = {
     "openai": {
         "name": "🤖 OpenAI",
-        "env_key": "OPENAI_API_KEY",
         "models": {
             "gpt-4o":        "GPT-4o 🔥",
             "gpt-4o-mini":   "GPT-4o Mini ⚡",
@@ -25,7 +31,6 @@ AVAILABLE_MODELS: dict[str, dict] = {
     },
     "anthropic": {
         "name": "🧠 Claude (Anthropic)",
-        "env_key": "ANTHROPIC_API_KEY",
         "models": {
             "claude-opus-4-5":           "Claude Opus 4.5 🔥",
             "claude-sonnet-4-5":         "Claude Sonnet 4.5 ⚡",
@@ -34,61 +39,53 @@ AVAILABLE_MODELS: dict[str, dict] = {
     },
     "grok": {
         "name": "🌟 Grok (xAI)",
-        "env_key": "GROK_API_KEY",
         "models": {
-            "grok-4-latest": "Grok 4 🔥",
-            "grok-3-latest": "Grok 3",
+            "grok-3-latest": "Grok 3 🔥",
             "grok-2-latest": "Grok 2",
         },
     },
     "gemini": {
         "name": "💎 Google Gemini",
-        "env_key": "GEMINI_API_KEY",
         "models": {
-            "gemini-2.5-flash-preview-05-20": "Gemini 2.5 Flash 🔥",
-            "gemini-2.0-flash":               "Gemini 2.0 Flash ⚡",
-            "gemini-1.5-pro":                 "Gemini 1.5 Pro",
+            # Only stable, confirmed-working model IDs
+            "gemini-2.0-flash":       "Gemini 2.0 Flash ⚡",
+            "gemini-1.5-flash":       "Gemini 1.5 Flash",
+            "gemini-1.5-pro":         "Gemini 1.5 Pro 🔥",
         },
     },
     "groq": {
-        "name": "⚡ Groq (Fast LLMs)",
-        "env_key": "GROQ_API_KEY",
+        "name": "⚡ Groq",
         "models": {
-            "llama-3.3-70b-versatile":        "Llama 3.3 70B ⚡",
-            "llama-3.1-8b-instant":           "Llama 3.1 8B Instant 🚀",
-            "openai/gpt-oss-120b":            "GPT-OSS 120B 🔥",
-            "deepseek-r1-distill-llama-70b":  "DeepSeek R1 70B",
-            "mixtral-8x7b-32768":             "Mixtral 8x7B",
+            "llama-3.3-70b-versatile":       "Llama 3.3 70B ⚡",
+            "llama-3.1-8b-instant":          "Llama 3.1 8B 🚀",
+            "deepseek-r1-distill-llama-70b": "DeepSeek R1 70B",
+            "mixtral-8x7b-32768":            "Mixtral 8x7B",
         },
     },
     "sambanova": {
         "name": "🚀 SambaNova",
-        "env_key": "SAMBANOVA_API_KEY",
         "models": {
             "Meta-Llama-3.3-70B-Instruct":  "Llama 3.3 70B ⚡",
             "Meta-Llama-3.1-405B-Instruct": "Llama 3.1 405B 🔥",
-            "ALLaM-7B-Instruct-preview":    "ALLaM 7B",
         },
     },
     "openrouter": {
         "name": "🔀 OpenRouter",
-        "env_key": "OPENROUTER_API_KEY",
         "models": {
-            "z-ai/glm-4.5-air:free":              "GLM-4.5 Air (Free)",
-            "google/gemini-2.0-flash-exp:free":   "Gemini 2.0 Flash (Free)",
-            "meta-llama/llama-3.3-70b-instruct":  "Llama 3.3 70B",
-            "deepseek/deepseek-chat-v3-0324:free": "DeepSeek V3 (Free)",
-            "mistralai/mistral-7b-instruct:free":  "Mistral 7B (Free)",
+            # Reliably free models as of 2025
+            "meta-llama/llama-3.3-70b-instruct:free":    "Llama 3.3 70B (Free)",
+            "deepseek/deepseek-chat-v3-0324:free":        "DeepSeek V3 (Free)",
+            "google/gemini-2.0-flash-exp:free":           "Gemini 2.0 Flash (Free)",
+            "mistralai/mistral-7b-instruct:free":         "Mistral 7B (Free)",
+            "microsoft/phi-3-mini-128k-instruct:free":    "Phi-3 Mini (Free)",
         },
     },
     "nvidia": {
         "name": "🟢 NVIDIA NIM",
-        "env_key": "NVIDIA_API_KEY",
         "models": {
-            "meta/llama-4-maverick-17b-128e-instruct": "Llama 4 Maverick 17B 🔥",
-            "meta/llama-3.3-70b-instruct":             "Llama 3.3 70B",
-            "nvidia/llama-3.1-nemotron-70b-instruct":  "Nemotron 70B",
-            "mistralai/mistral-large-2-instruct":      "Mistral Large 2",
+            "meta/llama-3.3-70b-instruct":              "Llama 3.3 70B",
+            "meta/llama-4-maverick-17b-128e-instruct":  "Llama 4 Maverick 🔥",
+            "nvidia/llama-3.1-nemotron-70b-instruct":   "Nemotron 70B",
         },
     },
 }
@@ -96,14 +93,14 @@ AVAILABLE_MODELS: dict[str, dict] = {
 
 def get_active_providers() -> list[str]:
     key_map = {
-        "openai":      config.OPENAI_API_KEY,
-        "anthropic":   config.ANTHROPIC_API_KEY,
-        "grok":        config.GROK_API_KEY,
-        "gemini":      config.GEMINI_API_KEY,
-        "groq":        config.GROQ_API_KEY,
-        "sambanova":   config.SAMBANOVA_API_KEY,
-        "openrouter":  config.OPENROUTER_API_KEY,
-        "nvidia":      config.NVIDIA_API_KEY,
+        "openai":     config.OPENAI_API_KEY,
+        "anthropic":  config.ANTHROPIC_API_KEY,
+        "grok":       config.GROK_API_KEY,
+        "gemini":     config.GEMINI_API_KEY,
+        "groq":       config.GROQ_API_KEY,
+        "sambanova":  config.SAMBANOVA_API_KEY,
+        "openrouter": config.OPENROUTER_API_KEY,
+        "nvidia":     config.NVIDIA_API_KEY,
     }
     return [p for p, k in key_map.items() if k.strip()]
 
@@ -113,101 +110,133 @@ def get_model_label(provider: str, model_id: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-#  ASYNC ENTRY POINT
+#  ASYNC STREAMING ENTRY POINT
 # ─────────────────────────────────────────────────────────────────
-async def get_ai_response(provider: str, model: str, messages: list) -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _dispatch, provider, model, messages)
-
-
-def _dispatch(provider: str, model: str, messages: list) -> str:
-    handlers = {
-        "openai":     _openai,
-        "anthropic":  _anthropic,
-        "grok":       _grok,
-        "gemini":     _gemini,
-        "groq":       _groq,
-        "sambanova":  _sambanova,
-        "openrouter": _openrouter,
-        "nvidia":     _nvidia,
-    }
-    fn = handlers.get(provider)
-    if fn is None:
-        raise ValueError(f"Unknown provider: {provider}")
-    return fn(model, messages)
+async def stream_ai_response(
+    provider: str, model: str, messages: list
+) -> AsyncGenerator[str, None]:
+    """Yields text chunks. All providers supported."""
+    try:
+        if provider == "groq":
+            async for chunk in _stream_groq(model, messages):
+                yield chunk
+        elif provider in ("openai", "grok", "sambanova", "nvidia"):
+            base_urls = {
+                "openai":    ("https://api.openai.com/v1",        config.OPENAI_API_KEY),
+                "grok":      ("https://api.x.ai/v1",              config.GROK_API_KEY),
+                "sambanova": ("https://api.sambanova.ai/v1",       config.SAMBANOVA_API_KEY),
+                "nvidia":    ("https://integrate.api.nvidia.com/v1", config.NVIDIA_API_KEY),
+            }
+            url, key = base_urls[provider]
+            async for chunk in _stream_openai_compat(url, key, model, messages):
+                yield chunk
+        elif provider == "openrouter":
+            async for chunk in _stream_openrouter(model, messages):
+                yield chunk
+        elif provider == "anthropic":
+            async for chunk in _stream_anthropic(model, messages):
+                yield chunk
+        elif provider == "gemini":
+            # Gemini new SDK — run sync in executor, then simulate streaming
+            loop = asyncio.get_event_loop()
+            full = await loop.run_in_executor(None, _gemini_sync, model, messages)
+            async for chunk in _simulate_stream(full):
+                yield chunk
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
+    except Exception as e:
+        logger.error("AI stream error [%s/%s]: %s", provider, model, e, exc_info=True)
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────
-#  OPENAI-COMPATIBLE HELPER
+#  SIMULATE STREAMING (for non-streaming providers)
 # ─────────────────────────────────────────────────────────────────
-def _openai_compat(base_url: str, api_key: str, model: str,
-                   messages: list, extra_headers: dict = None) -> str:
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key, base_url=base_url,
-                    default_headers=extra_headers or {})
-    resp = client.chat.completions.create(
+async def _simulate_stream(text: str, chunk_size: int = 20) -> AsyncGenerator[str, None]:
+    """Yield text in small chunks to simulate typing."""
+    for i in range(0, len(text), chunk_size):
+        yield text[i:i + chunk_size]
+        await asyncio.sleep(0.03)
+
+
+# ─────────────────────────────────────────────────────────────────
+#  GROQ  (official async SDK)
+# ─────────────────────────────────────────────────────────────────
+async def _stream_groq(model: str, messages: list) -> AsyncGenerator[str, None]:
+    from groq import AsyncGroq
+    client = AsyncGroq(api_key=config.GROQ_API_KEY)
+    stream = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=4096,
+        temperature=0.9,
+        stream=True,
+    )
+    async for chunk in stream:
+        content = chunk.choices[0].delta.content
+        if content:
+            yield content
+
+
+# ─────────────────────────────────────────────────────────────────
+#  OPENAI-COMPATIBLE  (OpenAI, Grok, SambaNova, NVIDIA)
+# ─────────────────────────────────────────────────────────────────
+async def _stream_openai_compat(
+    base_url: str, api_key: str, model: str, messages: list,
+    extra_headers: dict = None
+) -> AsyncGenerator[str, None]:
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        default_headers=extra_headers or {},
+        timeout=30.0,
+    )
+    stream = await client.chat.completions.create(
         model=model,
         messages=messages,
         max_tokens=2048,
-    )
-    return resp.choices[0].message.content
-
-
-# ─────────────────────────────────────────────────────────────────
-#  PROVIDER IMPLEMENTATIONS
-# ─────────────────────────────────────────────────────────────────
-def _openai(model: str, messages: list) -> str:
-    return _openai_compat("https://api.openai.com/v1", config.OPENAI_API_KEY, model, messages)
-
-
-def _grok(model: str, messages: list) -> str:
-    return _openai_compat("https://api.x.ai/v1", config.GROK_API_KEY, model, messages)
-
-
-def _sambanova(model: str, messages: list) -> str:
-    return _openai_compat("https://api.sambanova.ai/v1", config.SAMBANOVA_API_KEY, model, messages)
-
-
-def _openrouter(model: str, messages: list) -> str:
-    return _openai_compat(
-        "https://openrouter.ai/api/v1",
-        config.OPENROUTER_API_KEY,
-        model, messages,
-        extra_headers={
-            "HTTP-Referer": config.OPENROUTER_SITE_URL,
-            "X-Title":      config.OPENROUTER_SITE_NAME,
-        },
-    )
-
-
-def _nvidia(model: str, messages: list) -> str:
-    return _openai_compat(
-        "https://integrate.api.nvidia.com/v1",
-        config.NVIDIA_API_KEY,
-        model, messages,
-    )
-
-
-def _groq(model: str, messages: list) -> str:
-    from groq import Groq
-    client = Groq(api_key=config.GROQ_API_KEY)
-    stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=1,
-        max_completion_tokens=4096,
-        top_p=1,
         stream=True,
     )
-    return "".join(
-        chunk.choices[0].delta.content or ""
-        for chunk in stream
-    )
+    async for chunk in stream:
+        content = chunk.choices[0].delta.content
+        if content:
+            yield content
 
 
-def _anthropic(model: str, messages: list) -> str:
+# ─────────────────────────────────────────────────────────────────
+#  OPENROUTER  (OpenAI-compat with site headers + timeout)
+# ─────────────────────────────────────────────────────────────────
+async def _stream_openrouter(model: str, messages: list) -> AsyncGenerator[str, None]:
+    headers = {
+        "HTTP-Referer": config.OPENROUTER_SITE_URL,
+        "X-Title":      config.OPENROUTER_SITE_NAME,
+    }
+    try:
+        async for chunk in _stream_openai_compat(
+            "https://openrouter.ai/api/v1",
+            config.OPENROUTER_API_KEY,
+            model, messages,
+            extra_headers=headers,
+        ):
+            yield chunk
+    except Exception as e:
+        err_str = str(e).lower()
+        if "connection" in err_str or "timeout" in err_str:
+            raise ConnectionError(
+                "OpenRouter se connect nahi ho paya. "
+                "Network issue ya model unavailable. Dusra model try karo."
+            ) from e
+        raise
+
+
+# ─────────────────────────────────────────────────────────────────
+#  ANTHROPIC  (native streaming SDK)
+# ─────────────────────────────────────────────────────────────────
+async def _stream_anthropic(model: str, messages: list) -> AsyncGenerator[str, None]:
     import anthropic
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+
     system_text = "You are a helpful assistant."
     chat_msgs   = []
     for m in messages:
@@ -215,29 +244,45 @@ def _anthropic(model: str, messages: list) -> str:
             system_text = m["content"]
         else:
             chat_msgs.append(m)
-    resp = client.messages.create(
-        model=model, max_tokens=2048,
-        system=system_text, messages=chat_msgs,
-    )
-    return resp.content[0].text
+
+    async with client.messages.stream(
+        model=model,
+        max_tokens=2048,
+        system=system_text,
+        messages=chat_msgs,
+    ) as stream:
+        async for text in stream.text_stream:
+            yield text
 
 
-def _gemini(model: str, messages: list) -> str:
-    from google import genai as google_genai
-    client = google_genai.Client(api_key=config.GEMINI_API_KEY)
+# ─────────────────────────────────────────────────────────────────
+#  GEMINI  (sync, run in executor)
+# ─────────────────────────────────────────────────────────────────
+def _gemini_sync(model: str, messages: list) -> str:
+    from google import genai as gai
+    client = gai.Client(api_key=config.GEMINI_API_KEY)
 
-    # Build prompt from messages
+    # Build a single prompt string from message history
     parts = []
     for m in messages:
-        role = m["role"]
+        role    = m["role"]
         content = m["content"]
         if role == "system":
-            parts.append(f"[System Instructions]: {content}\n")
+            parts.append(f"[System]: {content}")
         elif role == "user":
-            parts.append(f"User: {content}")
+            parts.append(f"Human: {content}")
         elif role == "assistant":
             parts.append(f"Assistant: {content}")
 
-    full_prompt = "\n".join(parts)
-    resp = client.models.generate_content(model=model, contents=full_prompt)
-    return resp.text
+    prompt = "\n".join(parts)
+    try:
+        resp = client.models.generate_content(model=model, contents=prompt)
+        return resp.text
+    except Exception as e:
+        err = str(e)
+        if "404" in err or "not found" in err.lower():
+            raise RuntimeError(
+                f"Model `{model}` available nahi hai. "
+                "/model se dusra Gemini model chunein."
+            ) from e
+        raise
