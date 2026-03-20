@@ -15,30 +15,34 @@ PORT = int(os.environ.get("PORT", 10000))
 # ─────────────────────────────────────────────
 #  OWNER / ACCESS CONTROL
 # ─────────────────────────────────────────────
-OWNER_IDS: set[int] = {1598576202, 6518065496}
+OWNER_IDS: set[int]      = {1598576202, 6518065496}
 OWNER_USERNAMES: set[str] = {"xioqui_xin", "technicalserena"}
 
 # ─────────────────────────────────────────────
 #  AI API KEYS
 # ─────────────────────────────────────────────
-OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-GROK_API_KEY      = os.environ.get("GROK_API_KEY", "")
-GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY", "")
-GROQ_API_KEY      = os.environ.get("GROQ_API_KEY", "")
-SAMBANOVA_API_KEY = os.environ.get("SAMBANOVA_API_KEY", "")
+OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+GROK_API_KEY        = os.environ.get("GROK_API_KEY", "")         # xAI / Grok
+GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")       # Google Gemini
+GROQ_API_KEY        = os.environ.get("GROQ_API_KEY", "")         # Groq (fast LLMs)
+SAMBANOVA_API_KEY   = os.environ.get("SAMBANOVA_API_KEY", "")    # SambaNova
+OPENROUTER_API_KEY  = os.environ.get("OPENROUTER_API_KEY", "")   # OpenRouter
+NVIDIA_API_KEY      = os.environ.get("NVIDIA_API_KEY", "")       # NVIDIA NIM
 
 # ─────────────────────────────────────────────
-#  WELCOME MEDIA  (shown on /start)
-#  Set WELCOME_PIC or WELCOME_VIDEO in Render env
+#  MONGODB
 # ─────────────────────────────────────────────
-WELCOME_PIC   = os.environ.get("WELCOME_PIC", "")
-WELCOME_VIDEO = os.environ.get("WELCOME_VIDEO", "")
+MONGODB_URI = os.environ.get("MONGODB_URI", "")   # e.g. mongodb+srv://...
 
 # ─────────────────────────────────────────────
-#  CHARACTER PHOTOS  (Tinder card images)
-#  Set CHAR_1_PIC, CHAR_2_PIC ... CHAR_5_PIC
-#  Value = direct image URL or Telegram file_id
+#  WELCOME MEDIA  (/start pe dikhega)
+# ─────────────────────────────────────────────
+WELCOME_PIC   = os.environ.get("WELCOME_PIC", "")    # image URL or file_id
+WELCOME_VIDEO = os.environ.get("WELCOME_VIDEO", "")  # video URL or file_id
+
+# ─────────────────────────────────────────────
+#  CHARACTER PHOTOS  (Tinder cards)
 # ─────────────────────────────────────────────
 CHAR_1_PIC = os.environ.get("CHAR_1_PIC", "")
 CHAR_2_PIC = os.environ.get("CHAR_2_PIC", "")
@@ -52,3 +56,7 @@ CHAR_5_PIC = os.environ.get("CHAR_5_PIC", "")
 DEFAULT_PROVIDER = os.environ.get("DEFAULT_PROVIDER", "groq")
 DEFAULT_MODEL    = os.environ.get("DEFAULT_MODEL", "llama-3.3-70b-versatile")
 MAX_HISTORY      = int(os.environ.get("MAX_HISTORY", 20))
+
+# Site info sent to OpenRouter (optional, for rankings)
+OPENROUTER_SITE_URL  = os.environ.get("OPENROUTER_SITE_URL", "https://t.me")
+OPENROUTER_SITE_NAME = os.environ.get("OPENROUTER_SITE_NAME", "TelegramAIBot")

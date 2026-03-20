@@ -1,14 +1,22 @@
-# Telegram (webhooks extra is required for run_webhook on Render)
+# Telegram (webhooks extra required for Render)
 python-telegram-bot[webhooks]==21.6
 
-# OpenAI-compatible (OpenAI, Grok, Groq, SambaNova all use this)
+# OpenAI-compatible (OpenAI, Grok, Groq, SambaNova, OpenRouter, NVIDIA)
 openai>=1.40.0
 
 # Anthropic / Claude
 anthropic>=0.34.0
 
-# Google Gemini
-google-generativeai>=0.8.0
+# Google Gemini (new SDK)
+google-genai>=1.0.0
 
-# Groq (optional — openai-compat also works, but official SDK is nicer)
+# Groq official SDK (streaming)
 groq>=0.9.0
+
+# MongoDB async driver
+motor>=3.3.0
+pymongo>=4.6.0
+
+# HTTP (OpenRouter / NVIDIA fallback)
+requests>=2.31.0
+aiohttp>=3.9.0
