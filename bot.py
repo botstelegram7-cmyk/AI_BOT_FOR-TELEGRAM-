@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from telegram import (
     Bot, InlineKeyboardButton, InlineKeyboardMarkup,
-    InputMediaPhoto, Update,
+    InputMediaPhoto, Update, WebAppInfo,
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
@@ -237,7 +237,15 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lbl = get_model_label(state["provider"], state["model"])
         mode_line = f"🤖 AI Mode — `{lbl}`"
 
+    app_url = f"{config.WEBHOOK_URL}/app" if config.WEBHOOK_URL else None
     kb = [
+        [
+            InlineKeyboardButton(
+                "🚀 Open Mini App",
+                web_app=WebAppInfo(url=app_url) if app_url else None,
+                callback_data=None if app_url else "menu:noapp",
+            )
+        ] if app_url else [],
         [InlineKeyboardButton("💞 Meet Characters", callback_data="menu:meet"),
          InlineKeyboardButton("🎮 Games",           callback_data="menu:games")],
         [InlineKeyboardButton("🔌 Change Model",    callback_data="menu:model"),
@@ -247,6 +255,7 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Status",          callback_data="menu:status"),
          InlineKeyboardButton("🧹 Clear History",   callback_data="menu:clear")],
     ]
+    kb = [row for row in kb if row]  # remove empty rows
     if is_owner(user.id):
         kb.append([
             InlineKeyboardButton("📈 Stats",        callback_data="menu:stats"),
@@ -1450,6 +1459,7 @@ def build_ptb_app() -> Application:
     app.add_handler(CommandHandler("badges",      cmd_badges))
     app.add_handler(CommandHandler("gift",        cmd_gift))
 
+    app.add_handler(CommandHandler("app",         cmd_miniapp))
     app.add_handler(CommandHandler("stats",       cmd_stats))
     app.add_handler(CommandHandler("adduser",     cmd_adduser))
     app.add_handler(CommandHandler("removeuser",  cmd_removeuser))
@@ -1575,3 +1585,161 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ════════════════════════════════════════════════════════════
+#  MINI APP API ENDPOINTS
+# ════════════════════════════════════════════════════════════
+
+@web_app.get("/app", response_class=HTMLResponse)
+async def mini_app():
+    """Serves the Telegram Mini App HTML."""
+    import os
+    html_path = os.path.join(os.path.dirname(__file__), "webapp", "index.html")
+    try:
+        with open(html_path, "r") as f:
+            content = f.read()
+        # Inject bot URL dynamically
+        bot_username = (await _ptb_app.bot.get_me()).username if _ptb_app else "YourBot"
+        content = content.replace("YourBotUsername", bot_username)
+        return HTMLResponse(content)
+    except FileNotFoundError:
+        return HTMLResponse("<h1>Mini App not found</h1>", status_code=404)
+
+
+@web_app.get("/api/me")
+async def api_me(uid: int = 0):
+    """User's personal stats for Mini App."""
+    if not uid:
+        return JSONResponse({"error": "no uid"}, status_code=400)
+
+    prof   = db.get_profile(uid)
+    bdgs   = db.get_badges(uid)
+    rels   = db._relationships.get(uid, {})
+    best_r = max(rels.values()) if rels else 0
+
+    return JSONResponse({
+        "today":    db.get_usage_today(uid),
+        "total":    db.get_total_messages(uid),
+        "badges":   len(bdgs),
+        "best_rel": best_r,
+        "profile":  prof,
+    })
+
+
+@web_app.get("/api/leaderboard")
+async def api_leaderboard(uid: int = 0):
+    board = db.get_leaderboard(10)
+    data  = []
+    for u_id, total in board:
+        p    = db.get_profile(u_id)
+        info = db.get_allowed_users().get(u_id, {})
+        name = p.get("name") or info.get("username") or f"User {u_id}"
+        data.append({"uid": u_id, "name": name, "total": total,
+                     "today": db.get_usage_today(u_id)})
+    return JSONResponse({"data": data})
+
+
+@web_app.get("/api/characters")
+async def api_characters(uid: int = 0):
+    from characters import CHARACTERS, get_char_pic
+    chars_data = []
+    for c in CHARACTERS:
+        pts = db.get_relationship(uid, c["id"]) if uid else 0
+        chars_data.append({
+            "id":           c["id"],
+            "name":         c["name"],
+            "age":          c["age"],
+            "tagline":      c["tagline"],
+            "intro":        c["intro"],
+            "hobbies":      c["hobbies"],
+            "mood":         db.get_char_mood(c["id"]),
+            "relationship": pts,
+            "pic":          get_char_pic(c),
+        })
+    return JSONResponse({"characters": chars_data})
+
+
+@web_app.get("/api/badges")
+async def api_badges(uid: int = 0):
+    owned = list(db.get_badges(uid)) if uid else []
+    all_b = [
+        {"key": k, "emoji": v[0], "name": v[1], "desc": v[2]}
+        for k, v in db.BADGE_DEFINITIONS.items()
+    ]
+    return JSONResponse({"owned": owned, "all": all_b})
+
+
+@web_app.post("/api/profile")
+async def api_save_profile(request: Request, uid: int = 0):
+    if not uid:
+        return JSONResponse({"error": "no uid"}, status_code=400)
+    try:
+        data = await request.json()
+        prof = db.get_profile(uid)
+        for field in ("name", "age", "bio", "mood", "zodiac", "lang"):
+            if field in data:
+                prof[field] = data[field]
+        await db.save_profile(uid, prof)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@web_app.post("/api/chat")
+async def api_chat(request: Request, uid: int = 0):
+    """Mini App in-app chat endpoint — streams full reply."""
+    if not uid:
+        return JSONResponse({"error": "no uid"}, status_code=400)
+
+    ok, reason = can_use_bot(uid)
+    if not ok:
+        return JSONResponse({"reply": reason})
+
+    try:
+        body      = await request.json()
+        message   = body.get("message", "")
+        history   = body.get("history", [])
+        char_id   = body.get("character")
+
+        state = get_state(uid)
+
+        # Build system prompt
+        if char_id:
+            from characters import get_character
+            char       = get_character(char_id)
+            sys_prompt = char["prompt"] if char else current_system_prompt
+            mood       = db.get_char_mood(char_id)
+            sys_prompt += f"\n\nAaj tumhara mood {mood} hai."
+            prof = db.get_profile(uid)
+            if prof.get("name"):
+                sys_prompt += f"\n\nUser ka naam {prof['name']} hai."
+            # Update state
+            if state["character"] != char_id:
+                state.update({"mode": "character", "character": char_id, "history": []})
+        else:
+            sys_prompt = current_system_prompt
+
+        msgs = [{"role": "system", "content": sys_prompt}] + history + \
+               [{"role": "user", "content": message}]
+
+        # Collect full response (mini app doesn't stream)
+        full = ""
+        async for chunk in stream_ai_response(state["provider"], state["model"], msgs):
+            full += chunk
+
+        # Track usage + relationship
+        db.record_usage(uid)
+        await db.persist_usage(uid)
+        if char_id:
+            await db.add_relationship_point(uid, char_id)
+        new_b = await db.check_and_award_badges(uid)
+
+        return JSONResponse({
+            "reply":      full,
+            "new_badges": new_b,
+        })
+
+    except Exception as e:
+        logger.error("Mini app chat error: %s", e)
+        return JSONResponse({"reply": f"❌ Error: {e}"}, status_code=500)
